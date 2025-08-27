@@ -10,14 +10,19 @@ use winit::{
     window::Window,
 };
 
-pub struct App {
+use crate::{
+    asset_manager::importer::Importer,
+    render::{ForwardRenderer, RenderCommand, Renderer},
+};
+
+pub struct App<I: Importer> {
     pub window: Option<Arc<Window>>,
     pub world: World,
     //pub input: InputManager,
-    //pub renderer: ForwardRenderer,
+    pub renderer: ForwardRenderer<I>,
 }
 
-impl ApplicationHandler for App {
+impl<I: Importer> ApplicationHandler for App<I> {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.window.is_none() {
             #[cfg(not(target_arch = "wasm32"))]
@@ -44,33 +49,17 @@ impl ApplicationHandler for App {
                     .with_canvas(Some(canvas))
             };
 
-            self.window = Some(Arc::new(
-                event_loop.create_window(window_attributes).unwrap(),
-            ));
-
-            #[cfg(not(target_arch = "wasm32"))]
-            {
-                //let ctx = pollster::block_on(GpuContext::new(window.clone()));
-            }
-
-            #[cfg(target_arch = "wasm32")]
-            {
-                use wasm_bindgen_futures::spawn_local;
-
-                let window_clone = window.clone();
-
-                let renderer_ptr: *mut ForwardRenderer = &mut self.renderer;
-
-                spawn_local(async move {
-                    //let ctx = GpuContext::new(window_clone.clone()).await;
-                    //unsafe {
-                    //    // give the renderer the context
-                    //    (*renderer_ptr).init(ctx);
-                    //}
-                    //// nudge a redraw once the renderer is ready
-                    //window_clone.request_redraw();
-                });
-            }
+            let window = Arc::new(event_loop.create_window(window_attributes).unwrap());
+            self.renderer.init(&window);
+            self.renderer.setup_camera(
+                [0.0, 1.5, 5.0], // eye
+                [0.0, 0.0, 0.0], // target
+                [0.0, 1.0, 0.0], // up
+                60.0,            // fov in degrees
+                0.1,             // near
+                1000.0,          // far
+            );
+            self.window = Some(window);
         }
     }
 
@@ -82,6 +71,15 @@ impl ApplicationHandler for App {
     ) {
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
+            WindowEvent::RedrawRequested => {
+                if let Some(asset) = self.renderer.asset.as_mut() {
+                    let mesh_id = asset.get_mesh("../meshes/cube.gltf#Cube");
+                    self.renderer.render(&[RenderCommand { mesh_id }]);
+                }
+            }
+            WindowEvent::Resized(size) => {
+                self.renderer.resize(size.width, size.height);
+            }
             _ => {}
         }
     }

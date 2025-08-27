@@ -24,9 +24,9 @@ pub struct AssetManager<I: Importer> {
 }
 
 impl<I: Importer> AssetManager<I> {
-    pub fn new(importer: I, device: Arc<wgpu::Device>, queue: Arc<wgpu::Queue>) -> Self {
+    pub fn new(device: Arc<wgpu::Device>, queue: Arc<wgpu::Queue>) -> Self {
         Self {
-            importer,
+            importer: I::new(),
             device,
             queue,
             meshes_by_name: HashMap::new(),
@@ -34,4 +34,3 @@ impl<I: Importer> AssetManager<I> {
         }
     }
 }
-

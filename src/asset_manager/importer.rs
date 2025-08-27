@@ -1,14 +1,21 @@
 use super::mesh::{Index, Primitive, Vertex};
-use crate::asset_manager::MaterialId;
+use crate::asset_manager::{MaterialId, TextureId};
 use gltf::{self, mesh::Mode};
 
 pub trait Importer {
     fn load_mesh(&mut self, key: &str) -> Vec<Primitive>;
+    //fn load_material(&mut self, key: &str) -> MaterialId;
+    //fn load_textture(&mut self, key: &str) -> TextureId;
+
+    fn new() -> Self;
 }
 
 pub struct GltfImporter {}
 
 impl Importer for GltfImporter {
+    fn new() -> Self {
+        Self {}
+    }
     fn load_mesh(&mut self, key: &str) -> Vec<Primitive> {
         let (path, mesh_name_opt) = {
             let mut it = key.splitn(2, '#');
@@ -17,6 +24,7 @@ impl Importer for GltfImporter {
             (path, mesh_name_opt)
         };
 
+        println!("{}", path);
         let (doc, buffers, _images) = gltf::import(path).expect("Failed to load glTF file");
 
         let mesh = if let Some(target_name) = mesh_name_opt {
@@ -34,7 +42,7 @@ impl Importer for GltfImporter {
                 panic!("Unsupported primitive mode: {:?}", prim.mode());
             }
 
-            let reader = prim.reader(|buffer| Some(&buffers[buffer.index()][..]));
+            let reader = prim.reader(|buffer| Some(&buffers[buffer.index()].0[..]));
 
             let positions: Vec<[f32; 3]> = reader
                 .read_positions()
@@ -61,14 +69,10 @@ impl Importer for GltfImporter {
             let n = positions.len().min(normals.len()).min(uvs_f32.len());
             let mut vertices = Vec::with_capacity(n);
             for i in 0..n {
-                let p = positions[i];
-                let nrm = normals[i];
-                let uv = uvs_f32[i];
                 vertices.push(Vertex {
-                    position: p,
-                    normal: nrm,
-
-                    uv: [uv[0].to_bits(), uv[1].to_bits()],
+                    position: positions[i],
+                    normal: normals[i],
+                    uv: uvs_f32[i],
                 });
             }
 
@@ -82,12 +86,12 @@ impl Importer for GltfImporter {
                 });
             }
 
-            let default_material: MaterialId = Default::default();
+            let material: MaterialId = Default::default();
 
             out.push(Primitive {
                 vertex: vertices,
                 index: tri_indices,
-                default_material,
+                material,
             });
         }
 

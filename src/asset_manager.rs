@@ -1,6 +1,8 @@
 use std::{collections::HashMap, sync::Arc};
 
 pub mod importer;
+pub mod light;
+pub mod material;
 pub mod mesh;
 
 use importer::Importer;

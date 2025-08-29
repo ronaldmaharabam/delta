@@ -65,7 +65,6 @@ impl<I: Importer> AssetManager<I> {
 
         let primitives: Vec<Primitive> = self.importer.load_mesh(name);
 
-        // Flatten into single VB/IB
         let mut flat_vertices: Vec<Vertex> = Vec::new();
         let mut flat_indices_u32: Vec<u32> = Vec::new();
         let mut prim_ranges: Vec<PrimitiveRange> = Vec::new();

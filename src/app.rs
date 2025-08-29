@@ -11,7 +11,10 @@ use winit::{
 };
 
 use crate::{
-    asset_manager::importer::Importer,
+    asset_manager::{
+        importer::Importer,
+        light::{Light, LightKind},
+    },
     render::{ForwardRenderer, RenderCommand, Renderer},
 };
 
@@ -73,8 +76,35 @@ impl<I: Importer> ApplicationHandler for App<I> {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::RedrawRequested => {
                 if let Some(asset) = self.renderer.asset.as_mut() {
-                    let mesh_id = asset.get_mesh("../meshes/cube.gltf#Cube");
-                    self.renderer.render(&[RenderCommand { mesh_id }]);
+                    let mesh_id = asset.get_mesh("meshes/cube.gltf#Cube");
+                    let mut point_light = Light {
+                        kind: LightKind::Point,
+                        position: [0.0, 3.0, 0.0],
+                        color: [1.0, 0.5, 0.5], // white
+                        range: 15.0,
+                        ..Default::default()
+                    };
+
+                    let spotlight = Light {
+                        kind: LightKind::Spot,
+                        position: [0.0, 3.0, 0.0],
+                        direction: [0.0, -1.0, 0.0],
+                        color: [0.8, 0.8, 1.0], // bluish
+                        range: 20.0,
+                        inner_angle: 0.4, // tighter inner cone
+                        outer_angle: 0.7, // wider outer cone
+                        ..Default::default()
+                    };
+                    let directional_light = Light {
+                        kind: LightKind::Directional,
+                        direction: [0.0, -1.0, 0.0], // pointing down
+                        color: [1.0, 0.0, 0.0],      // red
+                        ..Default::default()
+                    };
+                    self.renderer.render(
+                        &[RenderCommand { mesh_id }],
+                        &[point_light, spotlight, directional_light],
+                    );
                 }
             }
             WindowEvent::Resized(size) => {

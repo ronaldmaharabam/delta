@@ -2,21 +2,21 @@ use super::mesh::{Index, Primitive, Vertex};
 use crate::asset_manager::{MaterialId, TextureId};
 use gltf::{self, mesh::Mode};
 
-pub trait Importer {
-    fn load_mesh(&mut self, key: &str) -> Vec<Primitive>;
-    //fn load_material(&mut self, key: &str) -> MaterialId;
-    //fn load_textture(&mut self, key: &str) -> TextureId;
-
-    fn new() -> Self;
-}
+//pub trait Importer {
+//    fn load_mesh(&mut self, key: &str) -> Vec<Primitive>;
+//    //fn load_material(&mut self, key: &str) -> MaterialId;
+//    //fn load_textture(&mut self, key: &str) -> TextureId;
+//
+//    fn new() -> Self;
+//}
 
 pub struct GltfImporter {}
 
-impl Importer for GltfImporter {
-    fn new() -> Self {
+impl GltfImporter {
+    pub fn new() -> Self {
         Self {}
     }
-    fn load_mesh(&mut self, key: &str) -> Vec<Primitive> {
+    pub fn load_mesh(&mut self, key: &str) -> Vec<Primitive> {
         let (path, mesh_name_opt) = {
             let mut it = key.splitn(2, '#');
             let path = it.next().unwrap_or(key);

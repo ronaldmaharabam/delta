@@ -23,11 +23,10 @@ fn main() {
     }
 
     let world = hecs::World::new();
-    let renderer = ForwardRenderer::new();
 
-    let mut app = App::<GltfImporter> {
+    let mut app = App {
         world,
-        renderer,
+        renderer: None,
         window: None,
     };
 
@@ -40,4 +39,3 @@ fn main() {
     #[cfg(target_arch = "wasm32")]
     event_loop.spawn_app(app);
 }
-

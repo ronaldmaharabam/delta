@@ -1,7 +1,9 @@
-use super::{AssetManager, MaterialId, MeshId, importer::Importer};
+use super::{AssetManager, MaterialId, MeshId};
 
 use bytemuck::{Pod, Zeroable};
 use wgpu::util::DeviceExt;
+
+pub const MAX_OBJECTS: usize = 10000;
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Zeroable, Pod)]
@@ -57,7 +59,11 @@ pub struct Mesh {
     pub index_format: Option<wgpu::IndexFormat>,
 }
 
-impl<I: Importer> AssetManager<I> {
+pub struct ObjectUniform {
+    pub model: [[f32; 4]; 4],
+}
+
+impl AssetManager {
     pub fn get_mesh(&mut self, name: &str) -> MeshId {
         if let Some(&id) = self.meshes_by_name.get(name) {
             return id;

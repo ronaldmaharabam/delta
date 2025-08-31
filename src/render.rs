@@ -1,3 +1,5 @@
+use anyhow::Result;
+use async_trait::async_trait;
 use glam::{Mat4, Vec3};
 use std::num::NonZeroU64;
 use std::sync::Arc;
@@ -7,16 +9,17 @@ use winit::window::Window;
 
 use gpu::GpuContext;
 
+use crate::asset_manager::AssetManager;
 use crate::asset_manager::MeshId;
 use crate::asset_manager::light::{Light, LightParams, LightUniform, MAX_LIGHTS};
 use crate::asset_manager::mesh::{Mesh, Vertex};
-use crate::asset_manager::{AssetManager, importer::Importer};
 
 const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 
 pub mod gpu;
 
 pub struct RenderResource(wgpu::Buffer, wgpu::BindGroupLayout, wgpu::BindGroupLayout);
+
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct CameraUniform {
@@ -31,6 +34,7 @@ impl CameraUniform {
     }
 }
 
+#[derive(Clone, Copy)]
 pub struct Camera {
     pub eye: Vec3,
     pub target: Vec3,
@@ -52,93 +56,160 @@ impl Camera {
 pub struct RenderCommand {
     pub mesh_id: MeshId,
 }
-pub trait Renderer {
-    fn init(&mut self, _window: &Arc<Window>) {}
-    fn render(&mut self, _cmds: &[RenderCommand], _lights: &[Light]) {}
-    fn resize(&mut self, _width: u32, _height: u32) {}
+
+pub struct ForwardRenderer {
+    pub context: gpu::GpuContext,
+    pub asset: AssetManager,
+    pub pipeline: wgpu::RenderPipeline,
+    pub camera_buffer: wgpu::Buffer,
+    pub camera_bg: wgpu::BindGroup,
+    pub camera_bgl: wgpu::BindGroupLayout,
+
+    pub camera: Camera,
+
+    pub depth_tex: wgpu::Texture,
+    pub depth_view: wgpu::TextureView,
+
+    pub light_ssbo: wgpu::Buffer,
+    pub light_params: wgpu::Buffer,
+    pub light_bg: wgpu::BindGroup,
+    pub light_bgl: wgpu::BindGroupLayout,
 }
 
-pub struct ForwardRenderer<I: Importer> {
-    pub context: Option<gpu::GpuContext>,
+impl ForwardRenderer {
+    //fn get_asset(&mut self) -> &AssetManager<I> {
+    //    &self.asset
+    //}
+    pub async fn new(window: &Arc<Window>) -> Result<Self> {
+        let ctx = GpuContext::new(window).await?;
 
-    pub asset: Option<AssetManager<I>>,
-    pub pipeline: Option<wgpu::RenderPipeline>,
-    pub camera_buffer: Option<wgpu::Buffer>,
-    pub camera_bg: Option<wgpu::BindGroup>,
-    pub camera_bgl: Option<wgpu::BindGroupLayout>,
+        let asset = AssetManager::new(ctx.device.clone(), ctx.queue.clone());
 
-    pub camera: Option<Camera>,
+        let (camera_buffer, camera_bgl, camera_bg) = Self::create_camera(&ctx.device);
+        let (light_ssbo, light_params, light_bgl, light_bg) =
+            Self::create_light(&ctx.device, MAX_LIGHTS);
 
-    pub depth_tex: Option<wgpu::Texture>,
-    pub depth_view: Option<wgpu::TextureView>,
+        let depth_tex = ctx.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("Depth"),
+            size: wgpu::Extent3d {
+                width: ctx.config.width,
+                height: ctx.config.height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: DEPTH_FORMAT,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        });
+        let depth_view = depth_tex.create_view(&wgpu::TextureViewDescriptor::default());
 
-    //light
-    pub light_ssbo: Option<wgpu::Buffer>,
-    pub light_params: Option<wgpu::Buffer>,
-    pub light_bg: Option<wgpu::BindGroup>,
-    pub light_bgl: Option<wgpu::BindGroupLayout>,
-}
+        let pipeline = {
+            let shader = ctx
+                .device
+                .create_shader_module(wgpu::ShaderModuleDescriptor {
+                    label: Some("Forward Shader"),
+                    source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Borrowed(include_str!(
+                        "../shaders/forward.wgsl"
+                    ))),
+                });
 
-impl<I: Importer> Renderer for ForwardRenderer<I> {
-    fn init(&mut self, window: &Arc<Window>) {
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            let ctx = pollster::block_on(GpuContext::new(&window)).expect("failed to init gup");
-            self.asset = Some(AssetManager::<I>::new(
-                ctx.device.clone(),
-                ctx.queue.clone(),
-            ));
-            self.context = Some(ctx);
-            self.setup();
-        }
+            let vertex_layout = Vertex::buffer_layout();
 
-        #[cfg(target_arch = "wasm32")]
-        {
-            use wasm_bindgen_futures::spawn_local;
+            let pipeline_layout =
+                ctx.device
+                    .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                        label: Some("Forward Pipeline Layout"),
+                        bind_group_layouts: &[&camera_bgl, &light_bgl],
+                        push_constant_ranges: &[],
+                    });
 
-            let window_clone = window.clone();
-
-            spawn_local(async move {
-                let ctx = GpuContext::new(window_clone.clone()).await;
-                self.asset = Some(AssetManager::<I>::new(
-                    ctx.device.clone(),
-                    ctx.queue.clone(),
-                ));
-                self.context = Some(ctx.expect("failed to init gpu"));
-                self.setup();
-            });
-        }
-    }
-
-    fn render(&mut self, cmds: &[RenderCommand], lights: &[Light]) {
-        let ctx = match self.context.as_ref() {
-            Some(c) => c,
-            None => return, // not initialized yet
+            ctx.device
+                .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                    label: Some("Forward Pipeline"),
+                    layout: Some(&pipeline_layout),
+                    vertex: wgpu::VertexState {
+                        module: &shader,
+                        entry_point: Some("vs_main"),
+                        buffers: &[vertex_layout],
+                        compilation_options: wgpu::PipelineCompilationOptions::default(),
+                    },
+                    fragment: Some(wgpu::FragmentState {
+                        module: &shader,
+                        entry_point: Some("fs_main"),
+                        targets: &[Some(wgpu::ColorTargetState {
+                            format: ctx.config.format,
+                            blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                            write_mask: wgpu::ColorWrites::ALL,
+                        })],
+                        compilation_options: wgpu::PipelineCompilationOptions::default(),
+                    }),
+                    primitive: wgpu::PrimitiveState::default(),
+                    depth_stencil: Some(wgpu::DepthStencilState {
+                        format: DEPTH_FORMAT,
+                        depth_write_enabled: true,
+                        depth_compare: wgpu::CompareFunction::Less,
+                        stencil: wgpu::StencilState::default(),
+                        bias: wgpu::DepthBiasState::default(),
+                    }),
+                    multisample: wgpu::MultisampleState::default(),
+                    multiview: None,
+                    cache: None,
+                })
         };
 
+        Ok(Self {
+            context: ctx,
+            asset,
+            pipeline,
+            camera_buffer,
+            camera_bg,
+            camera_bgl,
+            camera: Camera {
+                eye: Vec3::new(0.0, 0.0, 5.0),
+                target: Vec3::ZERO,
+                up: Vec3::Y,
+                fov_y_radians: 60.0f32.to_radians(),
+                z_near: 0.1,
+                z_far: 100.0,
+                aspect: 1.0,
+            },
+            depth_tex,
+            depth_view,
+            light_ssbo,
+            light_params,
+            light_bg,
+            light_bgl,
+        })
+    }
+    pub fn render(&mut self, lights: &[Light], cam: &Camera, action: &[RenderCommand]) {
+        let ctx = &self.context;
         let device = &ctx.device;
         let queue = &ctx.queue;
 
-        // --- acquire the current frame ---
+        //let vp = cam.view_proj();
+        //let cu = CameraUniform {
+        //    view_proj: vp.to_cols_array_2d(),
+        //};
+        //queue.write_buffer(&self.camera_buffer, 0, bytemuck::bytes_of(&cu));
+
         let frame = match ctx.surface.get_current_texture() {
             Ok(f) => f,
             Err(err) => {
                 match err {
                     wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated => {
-                        // Reconfigure the surface and try again next frame.
                         ctx.surface.configure(&ctx.device, &ctx.config);
                     }
                     wgpu::SurfaceError::OutOfMemory => {
-                        // Fatal: best to abort.
                         eprintln!("wgpu: OutOfMemory on surface get_current_texture");
                         std::process::exit(1);
                     }
                     wgpu::SurfaceError::Timeout => {
-                        // Non-fatal, just skip this frame.
                         eprintln!("wgpu: surface acquire timeout; skipping frame");
                     }
                     _ => {
-                        eprintln!("wgpu: surface acquire timeout; skipping frame");
+                        eprintln!("wgpu: surface acquire error; skipping frame");
                     }
                 }
                 return;
@@ -148,26 +219,14 @@ impl<I: Importer> Renderer for ForwardRenderer<I> {
         let color_view = frame
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
-        let depth_view = match self.depth_view.as_ref() {
-            Some(v) => v,
-            None => {
-                frame.present();
-                return;
-            }
-        };
+        let depth_view = &self.depth_view;
 
-        //light setup
+        // upload lights
         {
-            let light_buf = self.light_ssbo.as_ref().expect("light buffer not setup");
-            let params_buf = self.light_params.as_ref().expect("light params not setup");
-            let ctx = self
-                .context
-                .as_ref()
-                .expect("light render setup: context missing");
-            let queue = &ctx.queue;
+            let light_buf = &self.light_ssbo;
+            let params_buf = &self.light_params;
 
             let count = lights.len().min(MAX_LIGHTS);
-
             let mut tmp: Vec<LightUniform> = Vec::with_capacity(count);
             for l in lights.iter().take(count) {
                 tmp.push(l.into());
@@ -183,11 +242,11 @@ impl<I: Importer> Renderer for ForwardRenderer<I> {
             };
             queue.write_buffer(params_buf, 0, bytemuck::bytes_of(&params));
         }
+
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("Forward Encoder"),
         });
 
-        // begin render pass
         {
             let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("Forward Pass"),
@@ -212,16 +271,12 @@ impl<I: Importer> Renderer for ForwardRenderer<I> {
                 occlusion_query_set: None,
             });
 
-            rpass.set_pipeline(self.pipeline.as_ref().expect("pipeline not set"));
-            rpass.set_bind_group(0, self.camera_bg.as_ref().expect("camera bg"), &[]);
-            rpass.set_bind_group(1, self.light_bg.as_ref().expect("light bg"), &[]);
+            rpass.set_pipeline(&self.pipeline);
+            rpass.set_bind_group(0, &self.camera_bg, &[]);
+            rpass.set_bind_group(1, &self.light_bg, &[]);
 
-            let asset = self.asset.as_ref().expect("asset manager not set");
-
-            for cmd in cmds {
-                let mesh: &Mesh = asset
-                    .mesh(cmd.mesh_id)
-                    .expect("mesh id not found in AssetManager");
+            for cmd in action {
+                let mesh: &Mesh = self.asset.mesh(cmd.mesh_id).expect("mesh not found");
 
                 rpass.set_vertex_buffer(0, mesh.vertex_buf.slice(..));
 
@@ -242,18 +297,18 @@ impl<I: Importer> Renderer for ForwardRenderer<I> {
         queue.submit(Some(encoder.finish()));
         frame.present();
     }
-    fn resize(&mut self, width: u32, height: u32) {
+
+    pub fn resize(&mut self, width: u32, height: u32) {
         if width == 0 || height == 0 {
             return;
         }
 
-        let ctx = self.context.as_mut().expect("GPU context not initialized");
+        let ctx = &mut self.context;
         ctx.config.width = width;
         ctx.config.height = height;
         ctx.surface.configure(&ctx.device, &ctx.config);
 
-        // recreate depth
-        let depth_tex = ctx.device.create_texture(&wgpu::TextureDescriptor {
+        self.depth_tex = ctx.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("Depth"),
             size: wgpu::Extent3d {
                 width,
@@ -267,191 +322,33 @@ impl<I: Importer> Renderer for ForwardRenderer<I> {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
             view_formats: &[],
         });
-        let depth_view = depth_tex.create_view(&wgpu::TextureViewDescriptor::default());
-        self.depth_tex = Some(depth_tex);
-        self.depth_view = Some(depth_view);
+        self.depth_view = self
+            .depth_tex
+            .create_view(&wgpu::TextureViewDescriptor::default());
 
-        // update camera aspect & upload
-        if let Some(cam) = self.camera.as_mut() {
-            cam.aspect = width as f32 / height as f32;
-            self.update_camera_buffer();
-        }
-    }
-}
-
-impl<I: Importer> ForwardRenderer<I> {
-    pub fn new() -> Self {
-        Self {
-            context: None,
-            asset: None,
-            pipeline: None,
-            camera_buffer: None,
-            camera_bg: None,
-            camera_bgl: None,
-            camera: None,
-            depth_tex: None,
-            depth_view: None,
-            light_ssbo: None,
-            light_params: None,
-            light_bg: None,
-            light_bgl: None,
-        }
-    }
-    pub fn setup(&mut self) {
-        let ctx = self.context.as_ref().expect("GPU context not initialized");
-        let device = &ctx.device;
-        //let queue = &ctx.queue;
-
-        let surface_format = ctx.config.format;
-
-        let (camera_buffer, camera_bgl, camera_bg) = ForwardRenderer::<I>::create_camera(&device);
-
-        let (light_ssbo, light_params, light_bgl, light_bg) =
-            ForwardRenderer::<I>::create_light(&device, MAX_LIGHTS);
-
-        let depth_tex = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("Depth"),
-            size: wgpu::Extent3d {
-                width: ctx.config.width,
-                height: ctx.config.height,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: DEPTH_FORMAT,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-            view_formats: &[],
-        });
-        let depth_view = depth_tex.create_view(&wgpu::TextureViewDescriptor::default());
-
-        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("Forward Shader"),
-            source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Borrowed(include_str!(
-                "../shaders/forward.wgsl"
-            ))),
-        });
-
-        let vertex_layout = Vertex::buffer_layout();
-
-        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("Forward Pipeline Layout"),
-            bind_group_layouts: &[&camera_bgl, &light_bgl],
-            push_constant_ranges: &[],
-        });
-
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("Forward Pipeline"),
-            layout: Some(&pipeline_layout),
-
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: Some("vs_main"),
-                buffers: &[vertex_layout],
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: Some("fs_main"),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: surface_format,
-                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-            }),
-
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                strip_index_format: None,
-                front_face: wgpu::FrontFace::Ccw,
-                cull_mode: Some(wgpu::Face::Back),
-                unclipped_depth: false,
-                polygon_mode: wgpu::PolygonMode::Fill,
-                conservative: false,
-            },
-
-            depth_stencil: Some(wgpu::DepthStencilState {
-                format: DEPTH_FORMAT,
-                depth_write_enabled: true,
-                depth_compare: wgpu::CompareFunction::Less,
-                stencil: wgpu::StencilState::default(),
-                bias: wgpu::DepthBiasState::default(),
-            }),
-
-            multisample: wgpu::MultisampleState::default(),
-            multiview: None,
-            cache: None,
-        });
-
-        self.camera_buffer = Some(camera_buffer);
-        self.camera_bgl = Some(camera_bgl);
-        self.camera_bg = Some(camera_bg);
-        self.depth_view = Some(depth_view);
-        self.depth_tex = Some(depth_tex);
-        self.pipeline = Some(pipeline);
-
-        self.light_ssbo = Some(light_ssbo);
-        self.light_params = Some(light_params);
-        self.light_bgl = Some(light_bgl);
-        self.light_bg = Some(light_bg);
-    }
-    pub fn setup_camera(
-        &mut self,
-        eye: [f32; 3],
-        target: [f32; 3],
-        up: [f32; 3],
-        fov_y_degrees: f32,
-        z_near: f32,
-        z_far: f32,
-    ) {
-        let ctx = self.context.as_ref().expect("GPU context not initialized");
-
-        let aspect = ctx.config.width as f32 / ctx.config.height as f32;
-        let cam = Camera {
-            eye: Vec3::from(eye),
-            target: Vec3::from(target),
-            up: Vec3::from(up),
-            fov_y_radians: f32::to_radians(fov_y_degrees),
-            z_near,
-            z_far,
-            aspect,
-        };
-
-        self.camera = Some(cam);
+        self.camera.aspect = width as f32 / height as f32;
         self.update_camera_buffer();
     }
 
-    /// Recompute view-proj and write to GPU buffer (if camera exists).
     pub fn update_camera_buffer(&mut self) {
-        let (ctx, cam, camera_buffer) = match (
-            self.context.as_ref(),
-            self.camera.as_ref(),
-            self.camera_buffer.as_ref(),
-        ) {
-            (Some(ctx), Some(cam), Some(buf)) => (ctx, cam, buf),
-            _ => return,
-        };
-
-        let vp = cam.view_proj();
+        let vp = self.camera.view_proj();
         let cu = CameraUniform {
             view_proj: vp.to_cols_array_2d(),
         };
-        ctx.queue
-            .write_buffer(camera_buffer, 0, bytemuck::bytes_of(&cu));
+        self.context
+            .queue
+            .write_buffer(&self.camera_buffer, 0, bytemuck::bytes_of(&cu));
     }
-}
-impl<I: Importer> ForwardRenderer<I> {
+
     pub fn create_light(
         device: &wgpu::Device,
-        max_lights: usize, // e.g. 4096
+        max_lights: usize,
     ) -> (
         wgpu::Buffer,
         wgpu::Buffer,
         wgpu::BindGroupLayout,
         wgpu::BindGroup,
     ) {
-        // --- Bind group layout: STORAGE (lights) + UNIFORM (params) ---
         let light_bgl =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("Light BGL"),
@@ -462,7 +359,7 @@ impl<I: Importer> ForwardRenderer<I> {
                         ty: wgpu::BindingType::Buffer {
                             ty: wgpu::BufferBindingType::Storage { read_only: true },
                             has_dynamic_offset: false,
-                            min_binding_size: None, // can set to Some if you want validation
+                            min_binding_size: None,
                         },
                         count: None,
                     },
@@ -481,7 +378,6 @@ impl<I: Importer> ForwardRenderer<I> {
                 ],
             });
 
-        // --- Buffers ---
         let limits = device.limits();
         let light_stride = std::mem::size_of::<LightUniform>() as u64;
         let mut lights_size = (max_lights as u64).saturating_mul(light_stride);
@@ -505,7 +401,6 @@ impl<I: Importer> ForwardRenderer<I> {
             mapped_at_creation: false,
         });
 
-        // --- Bind group ---
         let light_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("Light BG"),
             layout: &light_bgl,
@@ -523,6 +418,7 @@ impl<I: Importer> ForwardRenderer<I> {
 
         (lights_ssbo, params_ubo, light_bgl, light_bg)
     }
+
     pub fn create_camera(
         device: &wgpu::Device,
     ) -> (wgpu::Buffer, wgpu::BindGroupLayout, wgpu::BindGroup) {

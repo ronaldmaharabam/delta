@@ -1,31 +1,22 @@
-use std::sync::Arc;
+use std::{marker::PhantomData, sync::Arc};
 
 use hecs::World;
-
 use winit::{
-    application::ApplicationHandler,
-    event::{ElementState, WindowEvent},
-    event_loop::ActiveEventLoop,
-    keyboard::PhysicalKey,
+    application::ApplicationHandler, event::WindowEvent, event_loop::ActiveEventLoop,
     window::Window,
 };
 
 use crate::{
-    asset_manager::{
-        importer::Importer,
-        light::{Light, LightKind},
-    },
-    render::{ForwardRenderer, RenderCommand, Renderer},
+    asset_manager::light::{Light, LightKind},
+    render::{Camera, ForwardRenderer, RenderCommand},
 };
 
-pub struct App<I: Importer> {
+pub struct App {
     pub window: Option<Arc<Window>>,
     pub world: World,
-    //pub input: InputManager,
-    pub renderer: ForwardRenderer<I>,
+    pub renderer: Option<ForwardRenderer>,
 }
-
-impl<I: Importer> ApplicationHandler for App<I> {
+impl ApplicationHandler for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.window.is_none() {
             #[cfg(not(target_arch = "wasm32"))]
@@ -53,15 +44,28 @@ impl<I: Importer> ApplicationHandler for App<I> {
             };
 
             let window = Arc::new(event_loop.create_window(window_attributes).unwrap());
-            self.renderer.init(&window);
-            self.renderer.setup_camera(
-                [0.0, 1.5, 5.0], // eye
-                [0.0, 0.0, 0.0], // target
-                [0.0, 1.0, 0.0], // up
-                60.0,            // fov in degrees
-                0.1,             // near
-                1000.0,          // far
-            );
+
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                let renderer = pollster::block_on(ForwardRenderer::new(&window))
+                    .expect("Failed to create renderer");
+                self.renderer = Some(renderer);
+            }
+
+            #[cfg(target_arch = "wasm32")]
+            {
+                use wasm_bindgen_futures::spawn_local;
+                let window_clone = window.clone();
+                let renderer_slot = &mut self.renderer;
+
+                spawn_local(async move {
+                    let renderer = ForwardRenderer::new(&window_clone)
+                        .await
+                        .expect("Failed to create renderer");
+                    *renderer_slot = Some(renderer);
+                });
+            }
+
             self.window = Some(window);
         }
     }
@@ -75,40 +79,38 @@ impl<I: Importer> ApplicationHandler for App<I> {
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::RedrawRequested => {
-                if let Some(asset) = self.renderer.asset.as_mut() {
+                if let Some(renderer) = self.renderer.as_mut() {
+                    let asset = &mut renderer.asset;
                     let mesh_id = asset.get_mesh("meshes/cube.gltf#Cube");
-                    let mut point_light = Light {
-                        kind: LightKind::Point,
-                        position: [0.0, 3.0, 0.0],
-                        color: [1.0, 0.5, 0.5], // white
-                        range: 15.0,
-                        ..Default::default()
-                    };
 
                     let spotlight = Light {
                         kind: LightKind::Spot,
                         position: [0.0, 3.0, 0.0],
                         direction: [0.0, -1.0, 0.0],
-                        color: [0.8, 0.8, 1.0], // bluish
+                        color: [0.8, 0.8, 1.0],
                         range: 20.0,
-                        inner_angle: 0.4, // tighter inner cone
-                        outer_angle: 0.7, // wider outer cone
+                        inner_angle: 0.4,
+                        outer_angle: 0.7,
                         ..Default::default()
                     };
-                    let directional_light = Light {
-                        kind: LightKind::Directional,
-                        direction: [0.0, -1.0, 0.0], // pointing down
-                        color: [1.0, 0.0, 0.0],      // red
-                        ..Default::default()
+
+                    let cam = Camera {
+                        eye: glam::Vec3::new(0.0, 1.5, 5.0),
+                        target: glam::Vec3::new(0.0, 0.0, 0.0),
+                        up: glam::Vec3::new(0.0, 1.0, 0.0),
+                        fov_y_radians: 60.0_f32.to_radians(),
+                        z_near: 0.1,
+                        z_far: 1000.0,
+                        aspect: 16.0 / 9.0,
                     };
-                    self.renderer.render(
-                        &[RenderCommand { mesh_id }],
-                        &[point_light, spotlight, directional_light],
-                    );
+
+                    renderer.render(&[spotlight], &cam, &[RenderCommand { mesh_id }]);
                 }
             }
             WindowEvent::Resized(size) => {
-                self.renderer.resize(size.width, size.height);
+                if let Some(renderer) = self.renderer.as_mut() {
+                    renderer.resize(size.width, size.height);
+                }
             }
             _ => {}
         }

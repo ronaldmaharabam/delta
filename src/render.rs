@@ -57,6 +57,11 @@ pub struct RenderCommand {
     pub mesh_id: MeshId,
 }
 
+pub struct Command {
+    pub mesh_ids: Vec<MeshId>,
+    pub transforms: Vec<[[f32; 4]; 4]>,
+}
+
 pub struct ForwardRenderer {
     pub context: gpu::GpuContext,
     pub asset: AssetManager,
@@ -74,20 +79,53 @@ pub struct ForwardRenderer {
     pub light_params: wgpu::Buffer,
     pub light_bg: wgpu::BindGroup,
     pub light_bgl: wgpu::BindGroupLayout,
+
+    pub mat_bg: wgpu::BindGroup,
+    pub mat_bgl: wgpu::BindGroupLayout,
+
+    pub mat_id_buffer: wgpu::Buffer,
+    pub mat_id_bgl: wgpu::BindGroupLayout,
+    pub mat_id_bg: wgpu::BindGroup,
 }
 
 impl ForwardRenderer {
-    //fn get_asset(&mut self) -> &AssetManager<I> {
-    //    &self.asset
-    //}
     pub async fn new(window: &Arc<Window>) -> Result<Self> {
         let ctx = GpuContext::new(window).await?;
 
         let asset = AssetManager::new(ctx.device.clone(), ctx.queue.clone());
 
+        // asset
+
+        let mat_bgl = ctx
+            .device
+            .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("Material BGL"),
+                entries: &[wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                }],
+            });
+
+        let mat_bg = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Material BG"),
+            layout: &mat_bgl,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: asset.mat_buffer.as_entire_binding(),
+            }],
+        });
+
         let (camera_buffer, camera_bgl, camera_bg) = Self::create_camera(&ctx.device);
         let (light_ssbo, light_params, light_bgl, light_bg) =
             Self::create_light(&ctx.device, MAX_LIGHTS);
+
+        let (mat_id_buffer, mat_id_bgl, mat_id_bg) = Self::create_material_id(&ctx.device);
 
         let depth_tex = ctx.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("Depth"),
@@ -121,7 +159,7 @@ impl ForwardRenderer {
                 ctx.device
                     .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                         label: Some("Forward Pipeline Layout"),
-                        bind_group_layouts: &[&camera_bgl, &light_bgl],
+                        bind_group_layouts: &[&camera_bgl, &light_bgl, &mat_bgl, &mat_id_bgl],
                         push_constant_ranges: &[],
                     });
 
@@ -181,6 +219,11 @@ impl ForwardRenderer {
             light_params,
             light_bg,
             light_bgl,
+            mat_bg,
+            mat_bgl,
+            mat_id_buffer,
+            mat_id_bgl,
+            mat_id_bg,
         })
     }
     pub fn render(&mut self, lights: &[Light], cam: &Camera, action: &[RenderCommand]) {
@@ -274,6 +317,7 @@ impl ForwardRenderer {
             rpass.set_pipeline(&self.pipeline);
             rpass.set_bind_group(0, &self.camera_bg, &[]);
             rpass.set_bind_group(1, &self.light_bg, &[]);
+            rpass.set_bind_group(2, &self.mat_bg, &[]);
 
             for cmd in action {
                 let mesh: &Mesh = self.asset.mesh(cmd.mesh_id).expect("mesh not found");
@@ -286,6 +330,9 @@ impl ForwardRenderer {
                     rpass.set_index_buffer(index_buf.slice(..), index_fmt);
 
                     for p in &mesh.primitives {
+                        let mat_id: u32 = p.material.0 as u32;
+                        queue.write_buffer(&self.mat_id_buffer, 0, bytemuck::bytes_of(&mat_id));
+                        rpass.set_bind_group(3, &self.mat_id_bg, &[]);
                         let first = p.first_index;
                         let count = p.index_count;
                         rpass.draw_indexed(first..first + count, p.base_vertex, 0..1);
@@ -452,5 +499,39 @@ impl ForwardRenderer {
             }],
         });
         (camera_buffer, camera_bgl, camera_bg)
+    }
+    pub fn create_material_id(
+        device: &wgpu::Device,
+    ) -> (wgpu::Buffer, wgpu::BindGroupLayout, wgpu::BindGroup) {
+        let material_id_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Material ID Buffer"),
+            size: std::mem::size_of::<u32>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        let material_id_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("Material ID BGL"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            }],
+        });
+
+        let material_id_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Material ID BG"),
+            layout: &material_id_bgl,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: material_id_buffer.as_entire_binding(),
+            }],
+        });
+        (material_id_buffer, material_id_bgl, material_id_bg)
     }
 }

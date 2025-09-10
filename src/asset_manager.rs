@@ -4,15 +4,16 @@ pub mod importer;
 pub mod light;
 pub mod material;
 pub mod mesh;
+pub mod texture;
 
 use importer::GltfImporter;
 use material::{MAX_MAT, MaterialUniform};
 use slotmap::{SlotMap, new_key_type};
 
+use crate::asset_manager::material::MaterialId;
+
 new_key_type! {
     pub struct MeshId;
-    pub struct MaterialId;
-    pub struct TextureId;
 }
 
 pub struct AssetManager {
@@ -26,8 +27,8 @@ pub struct AssetManager {
     pub meshes: SlotMap<MeshId, mesh::Mesh>,
 
     pub mat_buffer: wgpu::Buffer,
-
     pub mat_free: Vec<usize>,
+    pub mat_by_name: HashMap<String, MaterialId>,
 }
 
 impl AssetManager {
@@ -42,14 +43,24 @@ impl AssetManager {
             mapped_at_creation: false,
         });
 
+        let default_uniform = MaterialUniform::default();
+        queue.write_buffer(&mat_buffer, 0, bytemuck::bytes_of(&default_uniform));
+
         Self {
             importer: GltfImporter::new(),
             device,
             queue,
             meshes_by_name: HashMap::new(),
             meshes: SlotMap::with_key(),
-            mat_buffer: mat_buffer,
-            mat_free: (0..MAX_MAT).collect(),
+            mat_buffer,
+            mat_free: (1..MAX_MAT).collect(),
+            mat_by_name: HashMap::new(),
         }
+    }
+    fn split_key<'a>(key: &'a str) -> (&'a str, Option<&'a str>) {
+        let mut it = key.splitn(2, '#');
+        let path = it.next().unwrap_or(key);
+        let selector = it.next();
+        (path, selector)
     }
 }

@@ -1,4 +1,4 @@
-use super::{AssetManager, MaterialId, MeshId};
+use super::{AssetManager, MeshId, material::MaterialId};
 
 use bytemuck::{Pod, Zeroable};
 use wgpu::util::DeviceExt;
@@ -37,7 +37,7 @@ pub struct Index {
 pub struct Primitive {
     pub vertex: Vec<Vertex>,
     pub index: Vec<Index>,
-    pub material: MaterialId,
+    pub material: Option<usize>,
 }
 
 pub struct PrimitiveRange {
@@ -69,7 +69,9 @@ impl AssetManager {
             return id;
         }
 
-        let primitives: Vec<Primitive> = self.importer.load_mesh(name);
+        let (path, selector) = Self::split_key(name);
+
+        let primitives: Vec<Primitive> = self.importer.load_mesh(path, selector);
 
         let mut flat_vertices: Vec<Vertex> = Vec::new();
         let mut flat_indices_u32: Vec<u32> = Vec::new();
@@ -118,19 +120,23 @@ impl AssetManager {
                 // index_count = (vcount / 3) * 3;
             }
 
+            let material = if let Some(mat) = prim.material {
+                self.get_material(&format!("{}#{}", path, mat))
+            } else {
+                0.into()
+            };
             prim_ranges.push(PrimitiveRange {
                 first_index,
                 index_count,
                 base_vertex: base_vertex as i32,
                 aabb_min: min,
                 aabb_max: max,
-                material: prim.material,
+                material,
             });
 
             base_vertex += vcount;
         }
 
-        // Create GPU buffers
         let vertex_buf = self
             .device
             .create_buffer_init(&wgpu::util::BufferInitDescriptor {

@@ -1,39 +1,65 @@
-use super::mesh::{Index, Primitive, Vertex};
-use crate::asset_manager::{MaterialId, TextureId};
+use super::{
+    material::Material,
+    mesh::{Index, Primitive, Vertex},
+};
+use crate::asset_manager::{material::MaterialId, texture::TextureId};
 use gltf::{self, mesh::Mode};
 
-//pub trait Importer {
-//    fn load_mesh(&mut self, key: &str) -> Vec<Primitive>;
-//    //fn load_material(&mut self, key: &str) -> MaterialId;
-//    //fn load_textture(&mut self, key: &str) -> TextureId;
-//
-//    fn new() -> Self;
-//}
-
-pub struct GltfImporter {}
+pub struct GltfImporter;
 
 impl GltfImporter {
     pub fn new() -> Self {
-        Self {}
+        Self
     }
-    pub fn load_mesh(&mut self, key: &str) -> Vec<Primitive> {
-        let (path, mesh_name_opt) = {
-            let mut it = key.splitn(2, '#');
-            let path = it.next().unwrap_or(key);
-            let mesh_name_opt = it.next();
-            (path, mesh_name_opt)
-        };
 
-        println!("{}", path);
-        let (doc, buffers, _images) = gltf::import(path).expect("Failed to load glTF file");
+    fn split_key<'a>(key: &'a str) -> (&'a str, Option<&'a str>) {
+        let mut it = key.splitn(2, '#');
+        let path = it.next().unwrap_or(key);
+        let selector = it.next();
+        (path, selector)
+    }
 
-        let mesh = if let Some(target_name) = mesh_name_opt {
-            doc.meshes()
-                .find(|m| m.name().map(|n| n == target_name).unwrap_or(false))
-                .unwrap_or_else(|| panic!("Mesh named '{target_name}' not found in '{path}'"))
+    /// Helper: select a mesh by name or index.
+    fn select_mesh<'a>(doc: &'a gltf::Document, sel: Option<&str>, path: &str) -> gltf::Mesh<'a> {
+        if let Some(s) = sel {
+            if let Ok(idx) = s.parse::<usize>() {
+                doc.meshes()
+                    .nth(idx)
+                    .unwrap_or_else(|| panic!("Mesh index {idx} not found in '{path}'"))
+            } else {
+                doc.meshes()
+                    .find(|m| m.name().map(|n| n == s).unwrap_or(false))
+                    .unwrap_or_else(|| panic!("Mesh named '{s}' not found in '{path}'"))
+            }
         } else {
             doc.meshes().next().expect("No meshes in glTF file")
-        };
+        }
+    }
+
+    /// Helper: select a material by name or index.
+    fn select_material<'a>(
+        doc: &'a gltf::Document,
+        sel: Option<&str>,
+        path: &str,
+    ) -> gltf::Material<'a> {
+        if let Some(s) = sel {
+            if let Ok(idx) = s.parse::<usize>() {
+                doc.materials()
+                    .nth(idx)
+                    .unwrap_or_else(|| panic!("Material index {idx} not found in '{path}'"))
+            } else {
+                doc.materials()
+                    .find(|m| m.name().map(|n| n == s).unwrap_or(false))
+                    .unwrap_or_else(|| panic!("Material named '{s}' not found in '{path}'"))
+            }
+        } else {
+            doc.materials().next().expect("No materials in glTF file")
+        }
+    }
+
+    pub fn load_mesh(&mut self, path: &str, selector: Option<&str>) -> Vec<Primitive> {
+        let (doc, buffers, _images) = gltf::import(path).expect("Failed to load glTF file");
+        let mesh = Self::select_mesh(&doc, selector, path);
 
         let mut out: Vec<Primitive> = Vec::new();
 
@@ -67,27 +93,23 @@ impl GltfImporter {
             };
 
             let n = positions.len().min(normals.len()).min(uvs_f32.len());
-            let mut vertices = Vec::with_capacity(n);
-            for i in 0..n {
-                vertices.push(Vertex {
+            let vertices = (0..n)
+                .map(|i| Vertex {
                     position: positions[i],
                     normal: normals[i],
                     uv: uvs_f32[i],
-                });
-            }
+                })
+                .collect::<Vec<_>>();
 
-            let mut tri_indices = Vec::with_capacity(indices_u32.len() / 3);
-            for tri in indices_u32.chunks(3) {
-                if tri.len() < 3 {
-                    break;
-                }
-                tri_indices.push(Index {
+            let tri_indices = indices_u32
+                .chunks(3)
+                .filter(|tri| tri.len() == 3)
+                .map(|tri| Index {
                     idx: [tri[0], tri[1], tri[2]],
-                });
-            }
+                })
+                .collect::<Vec<_>>();
 
-            let material: MaterialId = Default::default();
-
+            let material = prim.material().index();
             out.push(Primitive {
                 vertex: vertices,
                 index: tri_indices,
@@ -96,5 +118,29 @@ impl GltfImporter {
         }
 
         out
+    }
+
+    pub fn load_material(&mut self, path: &str, selector: Option<&str>) -> Material {
+        let (doc, _buffers, _images) = gltf::import(path).expect("Failed to load glTF file");
+        let material = Self::select_material(&doc, selector, path);
+
+        let pbr = material.pbr_metallic_roughness();
+
+        Material {
+            base_color_factor: pbr.base_color_factor(),
+            metallic_factor: pbr.metallic_factor(),
+            roughness_factor: pbr.roughness_factor(),
+            emissive_factor: material.emissive_factor(),
+            alpha_cutoff: material.alpha_cutoff().unwrap_or(0.5),
+            double_sided: material.double_sided(),
+            base_color_texture: pbr.base_color_texture().map(|info| info.texture().index()),
+            metallic_roughness_texture: pbr
+                .metallic_roughness_texture()
+                .map(|info| info.texture().index()),
+            normal_texture: material.normal_texture().map(|info| info.texture().index()),
+            emissive_texture: material
+                .emissive_texture()
+                .map(|info| info.texture().index()),
+        }
     }
 }

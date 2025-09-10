@@ -80,7 +80,7 @@ impl ApplicationHandler for App {
             WindowEvent::RedrawRequested => {
                 if let Some(renderer) = self.renderer.as_mut() {
                     let asset = &mut renderer.asset;
-                    let mesh_id = asset.get_mesh("meshes/sphere.glb#0");
+                    let mesh_id = asset.get_mesh("meshes/cube.glb#0");
 
                     let spotlight = Light {
                         kind: LightKind::Spot,

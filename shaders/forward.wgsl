@@ -1,9 +1,11 @@
 // shaders/forward.wgsl
-
 const MAX_LIGHTS : u32 = 16u;
+const PI : f32 = 3.14159265359;
 
 struct Camera {
     view_proj : mat4x4<f32>,
+    camera_pos: vec3<f32>,
+    _pad0     : f32,
 };
 
 @group(0) @binding(0)
@@ -13,7 +15,7 @@ var<uniform> camera : Camera;
 struct GpuLight {
     position   : vec3<f32>,  _pad0 : f32,
     color      : vec3<f32>,  _pad1 : f32,
-    direction  : vec3<f32>,  light_type : u32, // 0=Point,1=Directional,2=Spot
+    direction  : vec3<f32>,  light_type : u32,
     range      : f32,
     inner_cos  : f32,
     outer_cos  : f32,
@@ -30,7 +32,6 @@ struct LightParams {
 
 @group(1) @binding(0)
 var<storage, read> u_lights : LightBuffer;
-
 @group(1) @binding(1)
 var<uniform> u_lightParams : LightParams;
 
@@ -49,7 +50,7 @@ struct Material {
 @group(2) @binding(0)
 var<storage, read> materials : array<Material>;
 
-// ---- Per-draw material ID (tiny uniform buffer instead of push constant)
+// ---- Per-draw material ID ----
 struct MaterialParams {
     id : u32,
 };
@@ -84,23 +85,65 @@ fn vs_main(in: VSIn) -> VSOut {
 // ---- Helpers ----
 fn saturate(x: f32) -> f32 { return clamp(x, 0.0, 1.0); }
 
-fn lambert(n: vec3<f32>, l: vec3<f32>) -> f32 {
-    return max(dot(n, l), 0.0);
-}
-
 fn range_atten(dist: f32, range: f32) -> f32 {
     let x = saturate(1.0 - dist / max(range, 1e-3));
     return x * x;
 }
 
+// Fresnel Schlick
+fn fresnel_schlick(cos_theta: f32, F0: vec3<f32>) -> vec3<f32> {
+    return F0 + (1.0 - F0) * pow(1.0 - cos_theta, 5.0);
+}
+
+// GGX / Trowbridge-Reitz normal distribution
+fn distribution_ggx(N: vec3<f32>, H: vec3<f32>, roughness: f32) -> f32 {
+    let a = roughness * roughness;
+    let a2 = a * a;
+    let NdotH = max(dot(N, H), 0.0);
+    let NdotH2 = NdotH * NdotH;
+    let denom = (NdotH2 * (a2 - 1.0) + 1.0);
+    return a2 / (PI * denom * denom + 1e-6);
+}
+
+// Schlick-GGX geometry (per-direction)
+fn geometry_schlick_ggx(NdotV: f32, roughness: f32) -> f32 {
+    let r = roughness + 1.0;
+    let k = (r * r) / 8.0; // UE4/roughness->k approximation
+    return NdotV / (NdotV * (1.0 - k) + k + 1e-6);
+}
+
+// Smith geometry (combined)
+fn geometry_smith(N: vec3<f32>, V: vec3<f32>, L: vec3<f32>, roughness: f32) -> f32 {
+    let NdotV = max(dot(N, V), 0.0);
+    let NdotL = max(dot(N, L), 0.0);
+    let ggx1 = geometry_schlick_ggx(NdotV, roughness);
+    let ggx2 = geometry_schlick_ggx(NdotL, roughness);
+    return ggx1 * ggx2;
+}
+
+// Simple Reinhard tonemap
+fn tonemap_reinhard(x: vec3<f32>) -> vec3<f32> {
+    return x / (x + vec3<f32>(1.0));
+}
+
 // ---- Fragment ----
 @fragment
 fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
+    // NOTE: CPU must ensure material_params.id is in-range.
     let mat = materials[material_params.id];
-    let albedo = mat.base_color_factor.rgb;
 
-    var color = vec3<f32>(0.0);
+    // base_color_factor in glTF is linear already => don't pow
+    let albedo : vec3<f32> = mat.base_color_factor.rgb;
+
+    let metallic  = mat.metallic_factor;
+    // clamp roughness to avoid singularities; allow very small values but not zero
+    let roughness = clamp(mat.roughness_factor, 0.02, 1.0);
+
     let N = normalize(in.n_ws);
+
+    // camera position provided in camera uniform
+    let V = normalize(camera.camera_pos - in.pos_ws);
+    var Lo = vec3<f32>(0.0);
 
     let count = min(u_lightParams.count, MAX_LIGHTS);
     for (var i: u32 = 0u; i < count; i = i + 1u) {
@@ -125,9 +168,40 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
             att       = range_atten(dist, Ld.range) * cone;
         }
 
-        let ndotl = lambert(N, L);
-        color += Ld.color * albedo * ndotl * att;
+        let H = normalize(V + L);
+
+        let NDF = distribution_ggx(N, H, roughness);
+        let G   = geometry_smith(N, V, L, roughness);
+
+        // F0: dielectric default 0.04, lerp to albedo for metals
+        var F0 = vec3<f32>(0.04);
+        // metallic blends the F0 toward albedo (albedo should be linear)
+        F0 = F0 + (albedo - F0) * metallic;
+
+        let cosHV = max(dot(H, V), 0.0);
+        let F = fresnel_schlick(cosHV, F0);
+
+        let NdotV = max(dot(N, V), 0.0);
+        let NdotL = max(dot(N, L), 0.0);
+
+        let numerator   = NDF * G * F;
+        let denominator = max(4.0 * NdotV * NdotL, 1e-6);
+        let specular    = numerator / denominator;
+
+        let kS = F;
+        let kD = (vec3<f32>(1.0) - kS) * (1.0 - metallic);
+
+        let diffuse = kD * albedo / PI;
+
+        Lo += (diffuse + specular) * Ld.color * NdotL * att;
     }
+
+    let emissive = mat.emissive_factor;
+
+    // HDR accumulation -> simple tonemap -> gamma
+    var color = Lo + emissive;
+    color = tonemap_reinhard(color);
+    color = pow(max(color, vec3<f32>(0.0)), vec3<f32>(1.0 / 2.2));
 
     return vec4<f32>(color, 1.0);
 }

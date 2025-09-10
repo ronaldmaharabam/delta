@@ -21,15 +21,19 @@ pub mod gpu;
 pub struct RenderResource(wgpu::Buffer, wgpu::BindGroupLayout, wgpu::BindGroupLayout);
 
 #[repr(C)]
-#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
-struct CameraUniform {
-    view_proj: [[f32; 4]; 4],
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable, Debug)]
+pub struct CameraUniform {
+    pub view_proj: [[f32; 4]; 4], // 64 bytes
+    pub camera_pos: [f32; 3],     // 12 bytes
+    pub _pad0: f32,               // 4 bytes padding -> align to 16
 }
 
 impl CameraUniform {
-    fn identity() -> Self {
+    pub fn identity() -> Self {
         Self {
             view_proj: glam::Mat4::IDENTITY.to_cols_array_2d(),
+            camera_pos: [0.0, 0.0, 0.0],
+            _pad0: 0.0,
         }
     }
 }
@@ -381,12 +385,13 @@ impl ForwardRenderer {
         let vp = self.camera.view_proj();
         let cu = CameraUniform {
             view_proj: vp.to_cols_array_2d(),
+            camera_pos: self.camera.eye.to_array(), // assuming glam::Vec3
+            _pad0: 0.0,
         };
         self.context
             .queue
             .write_buffer(&self.camera_buffer, 0, bytemuck::bytes_of(&cu));
     }
-
     pub fn create_light(
         device: &wgpu::Device,
         max_lights: usize,

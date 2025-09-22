@@ -8,15 +8,17 @@ use winit::{
 
 use crate::{
     asset_manager::light::{Light, LightKind},
+    game::Game,
     render::{Camera, ForwardRenderer, RenderCommand},
 };
 
-pub struct App {
+pub struct App<G: Game> {
     pub window: Option<Arc<Window>>,
     pub world: World,
     pub renderer: Option<ForwardRenderer>,
+    pub game: G,
 }
-impl ApplicationHandler for App {
+impl<G: Game> ApplicationHandler for App<G> {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.window.is_none() {
             #[cfg(not(target_arch = "wasm32"))]
@@ -50,6 +52,8 @@ impl ApplicationHandler for App {
                 let renderer = pollster::block_on(ForwardRenderer::new(&window))
                     .expect("Failed to create renderer");
                 self.renderer = Some(renderer);
+                self.game
+                    .update(&mut self.world, self.renderer.as_mut().unwrap());
             }
 
             #[cfg(target_arch = "wasm32")]
@@ -66,6 +70,9 @@ impl ApplicationHandler for App {
                 });
             }
             self.window = Some(window);
+            if let Some(renderer) = self.renderer.as_mut() {
+                self.game.setup(&mut self.world, renderer);
+            }
         }
     }
 
@@ -78,32 +85,40 @@ impl ApplicationHandler for App {
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::RedrawRequested => {
+                let Some(window) = self.window.as_ref() else {
+                    return;
+                };
+
+                if _window_id != window.id() {
+                    return;
+                }
                 if let Some(renderer) = self.renderer.as_mut() {
-                    let asset = &mut renderer.asset;
-                    let mesh_id = asset.get_mesh("meshes/cube.glb#0");
-
-                    let spotlight = Light {
-                        kind: LightKind::Spot,
-                        position: [0.0, 3.0, 0.0],
-                        direction: [0.0, -1.0, 0.0],
-                        color: [0.8, 0.8, 1.0],
-                        range: 20.0,
-                        inner_angle: 0.4,
-                        outer_angle: 0.7,
-                        ..Default::default()
-                    };
-
-                    let cam = Camera {
-                        eye: glam::Vec3::new(0.0, 1.5, 5.0),
-                        target: glam::Vec3::new(0.0, 0.0, 0.0),
-                        up: glam::Vec3::new(0.0, 1.0, 0.0),
-                        fov_y_radians: 60.0_f32.to_radians(),
-                        z_near: 0.1,
-                        z_far: 1000.0,
-                        aspect: 16.0 / 9.0,
-                    };
-
-                    renderer.render(&[spotlight], &cam, &[RenderCommand { mesh_id }]);
+                    self.game.update(&mut self.world, renderer);
+                    //let asset = &mut renderer.asset;
+                    //let mesh_id = asset.get_mesh("meshes/cube.glb#0");
+                    //
+                    //let spotlight = Light {
+                    //    kind: LightKind::Spot,
+                    //    position: [0.0, 3.0, 0.0],
+                    //    direction: [0.0, -1.0, 0.0],
+                    //    color: [0.8, 0.8, 1.0],
+                    //    range: 20.0,
+                    //    inner_angle: 0.4,
+                    //    outer_angle: 0.7,
+                    //    ..Default::default()
+                    //};
+                    //
+                    //let cam = Camera {
+                    //    eye: glam::Vec3::new(0.0, 1.5, 5.0),
+                    //    target: glam::Vec3::new(0.0, 0.0, 0.0),
+                    //    up: glam::Vec3::new(0.0, 1.0, 0.0),
+                    //    fov_y_radians: 60.0_f32.to_radians(),
+                    //    z_near: 0.1,
+                    //    z_far: 1000.0,
+                    //    aspect: 16.0 / 9.0,
+                    //};
+                    //
+                    //renderer.render(&[spotlight], &cam, &[RenderCommand { mesh_id }]);
                 }
             }
             WindowEvent::Resized(size) => {

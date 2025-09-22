@@ -1,3 +1,5 @@
+use engine::game::Game;
+//use engine::game::Game;
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::prelude::*;
 
@@ -24,10 +26,13 @@ fn main() {
 
     let world = hecs::World::new();
 
+    let game = ();
+
     let mut app = App {
         world,
         renderer: None,
         window: None,
+        game,
     };
 
     let event_loop = EventLoop::new().unwrap();

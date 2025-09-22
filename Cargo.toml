@@ -31,3 +31,7 @@ crate-type = ["cdylib", "rlib"]
 [[example]]
 name="ex1"
 path="game/first.rs"
+
+[[example]]
+name="moon"
+path="game/moon.rs"

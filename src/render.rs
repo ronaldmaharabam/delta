@@ -56,6 +56,19 @@ impl Camera {
         proj * view
     }
 }
+impl Default for Camera {
+    fn default() -> Self {
+        Self {
+            eye: Vec3::new(0.0, 5.0, 10.0),
+            target: Vec3::ZERO,
+            up: Vec3::Y,
+            fov_y_radians: std::f32::consts::FRAC_PI_4, // 45 degrees
+            z_near: 0.1,
+            z_far: 1000.0,
+            aspect: 16.0 / 9.0,
+        }
+    }
+}
 
 pub struct RenderCommand {
     pub mesh_id: MeshId,
@@ -231,6 +244,9 @@ impl ForwardRenderer {
         })
     }
     pub fn render(&mut self, lights: &[Light], cam: &Camera, action: &[RenderCommand]) {
+        self.camera = cam.clone();
+        self.update_camera_buffer();
+
         let ctx = &self.context;
         let device = &ctx.device;
         let queue = &ctx.queue;
@@ -335,6 +351,7 @@ impl ForwardRenderer {
 
                     for p in &mesh.primitives {
                         let mat_id: u32 = p.material.0 as u32;
+                        println!("this: {}", mat_id);
                         queue.write_buffer(&self.mat_id_buffer, 0, bytemuck::bytes_of(&mat_id));
                         rpass.set_bind_group(3, &self.mat_id_bg, &[]);
                         let first = p.first_index;

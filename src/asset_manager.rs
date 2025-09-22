@@ -53,7 +53,7 @@ impl AssetManager {
             meshes_by_name: HashMap::new(),
             meshes: SlotMap::with_key(),
             mat_buffer,
-            mat_free: (1..MAX_MAT).collect(),
+            mat_free: (1..MAX_MAT).rev().collect(),
             mat_by_name: HashMap::new(),
         }
     }

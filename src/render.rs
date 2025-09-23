@@ -12,6 +12,8 @@ use gpu::GpuContext;
 use crate::asset_manager::AssetManager;
 use crate::asset_manager::MeshId;
 use crate::asset_manager::light::{Light, LightParams, LightUniform, MAX_LIGHTS};
+use crate::asset_manager::material::MAX_MAT;
+use crate::asset_manager::material::MatId;
 use crate::asset_manager::mesh::{Mesh, Vertex};
 
 const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
@@ -142,7 +144,8 @@ impl ForwardRenderer {
         let (light_ssbo, light_params, light_bgl, light_bg) =
             Self::create_light(&ctx.device, MAX_LIGHTS);
 
-        let (mat_id_buffer, mat_id_bgl, mat_id_bg) = Self::create_material_id(&ctx.device);
+        let (mat_id_buffer, mat_id_bgl, mat_id_bg) =
+            Self::create_material_id(&ctx.device, &ctx.queue, MAX_MAT);
 
         let depth_tex = ctx.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("Depth"),
@@ -350,10 +353,11 @@ impl ForwardRenderer {
                     rpass.set_index_buffer(index_buf.slice(..), index_fmt);
 
                     for p in &mesh.primitives {
-                        let mat_id: u32 = p.material.0 as u32;
-                        println!("this: {}", mat_id);
-                        queue.write_buffer(&self.mat_id_buffer, 0, bytemuck::bytes_of(&mat_id));
-                        rpass.set_bind_group(3, &self.mat_id_bg, &[]);
+                        //let mat_id: u32 = p.material.0 as u32;
+                        let offset = (p.material.0 * std::mem::size_of::<MatId>()) as u32;
+
+                        //queue.write_buffer(&self.mat_id_buffer, 0, bytemuck::bytes_of(&mat_id));
+                        rpass.set_bind_group(3, &self.mat_id_bg, &[offset]);
                         let first = p.first_index;
                         let count = p.index_count;
                         rpass.draw_indexed(first..first + count, p.base_vertex, 0..1);
@@ -524,13 +528,28 @@ impl ForwardRenderer {
     }
     pub fn create_material_id(
         device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        max_ids: usize,
     ) -> (wgpu::Buffer, wgpu::BindGroupLayout, wgpu::BindGroup) {
+        // Fill [0, 1, 2, …, max_ids-1]
+        let mat_ids: Vec<MatId> = (0..max_ids as u32)
+            .map(|i| MatId {
+                id: i,
+                _pad: [0; 63],
+            })
+            .collect();
+
+        let size = (mat_ids.len() * std::mem::size_of::<MatId>()) as wgpu::BufferAddress;
+
         let material_id_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Material ID Buffer"),
-            size: std::mem::size_of::<u32>() as u64,
+            size: size.next_multiple_of(wgpu::COPY_BUFFER_ALIGNMENT),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
+
+        // Upload once
+        queue.write_buffer(&material_id_buffer, 0, bytemuck::cast_slice(&mat_ids));
 
         let material_id_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("Material ID BGL"),
@@ -539,21 +558,25 @@ impl ForwardRenderer {
                 visibility: wgpu::ShaderStages::FRAGMENT,
                 ty: wgpu::BindingType::Buffer {
                     ty: wgpu::BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
+                    has_dynamic_offset: true,
+                    min_binding_size: NonZeroU64::new(32), // must match WGSL struct size
                 },
                 count: None,
             }],
         });
-
         let material_id_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("Material ID BG"),
             layout: &material_id_bgl,
             entries: &[wgpu::BindGroupEntry {
                 binding: 0,
-                resource: material_id_buffer.as_entire_binding(),
+                resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                    buffer: &material_id_buffer,
+                    offset: 0,
+                    size: NonZeroU64::new(std::mem::size_of::<MatId>() as u64),
+                }),
             }],
         });
+
         (material_id_buffer, material_id_bgl, material_id_bg)
     }
 }

@@ -53,6 +53,8 @@ var<storage, read> materials : array<Material>;
 // ---- Per-draw material ID ----
 struct MaterialParams {
     id : u32,
+    _pad: vec3<u32>, 
+
 };
 
 @group(3) @binding(0)

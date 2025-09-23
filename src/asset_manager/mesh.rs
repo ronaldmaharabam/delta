@@ -81,7 +81,6 @@ impl AssetManager {
             } else {
                 0.into()
             };
-            println!("wtf: {}", material.0);
             self.set_mat(id, idx, material);
         }
         id

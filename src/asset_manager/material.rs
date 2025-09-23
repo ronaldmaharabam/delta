@@ -130,3 +130,10 @@ impl AssetManager {
         idx.into()
     }
 }
+
+#[repr(C, align(16))]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct MatId {
+    pub id: u32,
+    pub _pad: [u32; 63],
+}

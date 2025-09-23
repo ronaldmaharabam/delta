@@ -25,13 +25,23 @@ impl GpuContext {
             .await
             .context("No suitable GPU adapters found on the system")?;
 
-        let required_limits = wgpu::Limits::default().using_resolution(adapter.limits());
+        //let required_limits = wgpu::Limits::default().using_resolution(adapter.limits());
+        let adapter_limits = adapter.limits();
 
+        let limits = wgpu::Limits {
+            max_binding_array_elements_per_shader_stage: adapter_limits
+                .max_binding_array_elements_per_shader_stage
+                .min(8192),
+            ..wgpu::Limits::downlevel_defaults().using_resolution(adapter_limits)
+        };
+        let features = wgpu::Features::TEXTURE_BINDING_ARRAY
+            | wgpu::Features::SAMPLED_TEXTURE_AND_STORAGE_BUFFER_ARRAY_NON_UNIFORM_INDEXING
+            | wgpu::Features::TEXTURE_BINDING_ARRAY;
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
                 label: Some("Device"),
-                required_features: wgpu::Features::empty(),
-                required_limits,
+                required_features: features,
+                required_limits: limits,
                 ..Default::default()
             })
             .await

@@ -40,7 +40,13 @@ pub struct MaterialUniform {
     pub roughness_factor: f32,
     pub alpha_cutoff: f32,
     pub double_sided: u32,
-    pub texture_indices: [i32; 4],
+    pub base_color_tex: u32,         // sRGB array
+    pub emissive_tex: u32,           // sRGB array
+    pub normal_tex: u32,             // linear array
+    pub metallic_roughness_tex: u32, // linear array
+    pub occlusion_tex: u32,          // linear array
+
+    pub _pad1: [u32; 3],
 }
 impl Default for MaterialUniform {
     fn default() -> Self {
@@ -52,7 +58,12 @@ impl Default for MaterialUniform {
             roughness_factor: -1.0,
             alpha_cutoff: -1.0,
             double_sided: 12345,
-            texture_indices: [-999; 4],
+            base_color_tex: 0,
+            emissive_tex: 0,
+            normal_tex: 0,
+            metallic_roughness_tex: 0,
+            occlusion_tex: 0,
+            _pad1: [0; 3],
         }
     }
 }
@@ -67,7 +78,7 @@ impl From<&Material> for MaterialUniform {
             roughness_factor: m.roughness_factor,
             alpha_cutoff: m.alpha_cutoff,
             double_sided: if m.double_sided { 1 } else { 0 },
-            texture_indices: [0; 4],
+            ..Default::default()
         }
     }
 }
@@ -109,12 +120,11 @@ impl AssetManager {
             emissive_padding: 0.0,
             alpha_cutoff: material.alpha_cutoff,
             double_sided: material.double_sided as u32,
-            texture_indices: [
-                base_color_tex.0 as i32,
-                metallic_roughness_tex.0 as i32,
-                normal_tex.0 as i32,
-                emissive_tex.0 as i32,
-            ],
+            base_color_tex: base_color_tex.0 as u32,
+            metallic_roughness_tex: metallic_roughness_tex.0 as u32,
+            normal_tex: normal_tex.0 as u32,
+            emissive_tex: emissive_tex.0 as u32,
+            ..Default::default()
         };
 
         let idx = self

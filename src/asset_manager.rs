@@ -1,4 +1,4 @@
-use std::{collections::HashMap, num::NonZeroU32, sync::Arc};
+use std::{collections::HashMap, sync::Arc};
 
 pub mod importer;
 pub mod light;
@@ -12,11 +12,13 @@ use slotmap::{SlotMap, new_key_type};
 
 use crate::asset_manager::{
     material::MaterialId,
-    texture::{MAX_COLOR_TEXTURES, MAX_DATA_TEXTURES, MAX_DEPTH_TEXTURES},
+    texture::{GpuTexture, TextureGroup, TextureKey},
 };
 
 new_key_type! {
     pub struct MeshId;
+    pub struct TextureId;
+    pub struct SamplerId;
 }
 
 pub struct AssetManager {
@@ -32,19 +34,14 @@ pub struct AssetManager {
     pub mat_buffer: wgpu::Buffer,
     pub mat_free: Vec<usize>,
     pub mat_by_name: HashMap<String, MaterialId>,
+    pub tex_by_mat: Vec<TextureGroup>,
 
-    // Bindless texture arrays
-    pub color_textures: Vec<wgpu::TextureView>, // sRGB: baseColor, emissive
-    pub data_textures: Vec<wgpu::TextureView>,  // linear: normal, MR, AO
-    pub depth_textures: Vec<wgpu::TextureView>, // shadow maps
+    pub tex_by_key: HashMap<TextureKey, TextureId>,
+    pub textures: SlotMap<TextureId, GpuTexture>,
 
-    pub color_samplers: Vec<wgpu::Sampler>,
-    pub data_samplers: Vec<wgpu::Sampler>,
-    pub depth_samplers: Vec<wgpu::Sampler>,
-
-    // Global bind group
-    pub texture_bind_group: wgpu::BindGroup,
-    pub texture_bind_group_layout: wgpu::BindGroupLayout,
+    pub sampler_default: SamplerId,
+    pub sampler_by_name: HashMap<String, SamplerId>,
+    pub samplers: SlotMap<SamplerId, wgpu::Sampler>,
 }
 
 impl AssetManager {
@@ -62,85 +59,19 @@ impl AssetManager {
         let default_uniform = MaterialUniform::default();
         queue.write_buffer(&mat_buffer, 0, bytemuck::bytes_of(&default_uniform));
 
-        let dummy_white = Self::create_color_texture(&device, &queue, &[255, 255, 255, 255], 1, 1);
-        let dummy_normal = Self::create_data_texture(&device, &queue, &[128, 128, 255, 255], 1, 1);
-        let dummy_depth = Self::create_depth_texture(&device, 1, 1);
+        let mut samplers = SlotMap::with_key();
 
-        let color_textures = vec![dummy_white.create_view(&wgpu::TextureViewDescriptor::default())];
-        let data_textures = vec![dummy_normal.create_view(&wgpu::TextureViewDescriptor::default())];
-        let depth_textures = vec![dummy_depth.create_view(&wgpu::TextureViewDescriptor::default())];
-
-        let color_samplers = vec![device.create_sampler(&wgpu::SamplerDescriptor::default())];
-        let data_samplers = vec![device.create_sampler(&wgpu::SamplerDescriptor::default())];
-        let depth_samplers = vec![device.create_sampler(&wgpu::SamplerDescriptor {
-            compare: Some(wgpu::CompareFunction::LessEqual),
-            ..Default::default()
-        })];
-
-        // --- Layout ---
-        let texture_bind_group_layout =
-            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                entries: &[
-                    // color
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 0,
-                        visibility: wgpu::ShaderStages::FRAGMENT,
-                        ty: wgpu::BindingType::Texture {
-                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                            view_dimension: wgpu::TextureViewDimension::D2,
-                            multisampled: false,
-                        },
-                        count: NonZeroU32::new(MAX_COLOR_TEXTURES),
-                    },
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 1,
-                        visibility: wgpu::ShaderStages::FRAGMENT,
-                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                        count: NonZeroU32::new(MAX_COLOR_TEXTURES),
-                    },
-                    // data
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 2,
-                        visibility: wgpu::ShaderStages::FRAGMENT,
-                        ty: wgpu::BindingType::Texture {
-                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                            view_dimension: wgpu::TextureViewDimension::D2,
-                            multisampled: false,
-                        },
-                        count: NonZeroU32::new(MAX_DATA_TEXTURES),
-                    },
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 3,
-                        visibility: wgpu::ShaderStages::FRAGMENT,
-                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                        count: NonZeroU32::new(MAX_DATA_TEXTURES),
-                    },
-                    // depth
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 4,
-                        visibility: wgpu::ShaderStages::FRAGMENT,
-                        ty: wgpu::BindingType::Texture {
-                            sample_type: wgpu::TextureSampleType::Depth,
-                            view_dimension: wgpu::TextureViewDimension::D2,
-                            multisampled: false,
-                        },
-                        count: NonZeroU32::new(MAX_DEPTH_TEXTURES),
-                    },
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 5,
-                        visibility: wgpu::ShaderStages::FRAGMENT,
-                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Comparison),
-                        count: NonZeroU32::new(MAX_DEPTH_TEXTURES),
-                    },
-                ],
-                label: Some("texture_bind_group_layout"),
-            });
-
-        let texture_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            layout: &texture_bind_group_layout,
-            entries: &[],
-            label: Some("texture_bind_group"),
-        });
+        let sampler_default: SamplerId =
+            samplers.insert(device.create_sampler(&wgpu::SamplerDescriptor {
+                label: Some("Default Sampler"),
+                address_mode_u: wgpu::AddressMode::ClampToEdge,
+                address_mode_v: wgpu::AddressMode::ClampToEdge,
+                address_mode_w: wgpu::AddressMode::ClampToEdge,
+                mag_filter: wgpu::FilterMode::Linear,
+                min_filter: wgpu::FilterMode::Linear,
+                mipmap_filter: wgpu::FilterMode::Linear,
+                ..Default::default()
+            }));
 
         Self {
             importer: GltfImporter::new(),
@@ -151,14 +82,12 @@ impl AssetManager {
             mat_buffer,
             mat_free: (1..MAX_MAT).rev().collect(),
             mat_by_name: HashMap::new(),
-            color_textures,
-            data_textures,
-            depth_textures,
-            color_samplers,
-            data_samplers,
-            depth_samplers,
-            texture_bind_group,
-            texture_bind_group_layout,
+            tex_by_key: HashMap::new(),
+            textures: SlotMap::with_key(),
+            tex_by_mat: Vec::with_capacity(MAX_MAT as usize),
+            sampler_by_name: HashMap::new(),
+            samplers,
+            sampler_default,
         }
     }
     fn split_key<'a>(key: &'a str) -> (&'a str, Option<&'a str>) {
@@ -167,4 +96,19 @@ impl AssetManager {
         let selector = it.next();
         (path, selector)
     }
+    fn split_path<'a>(key: &'a str) -> Result<(&'a str, usize), ()> {
+        let mut it = key.splitn(2, '#');
+        let path = it.next().unwrap();
+
+        let selector_str = it.next().ok_or(())?;
+
+        let selector = selector_str.parse::<usize>().map_err(|_| ())?;
+
+        Ok((path, selector))
+    }
+}
+#[derive(Debug)]
+pub enum SplitPathError {
+    MissingSeparator,
+    InvalidSelector,
 }

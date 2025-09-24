@@ -1,4 +1,6 @@
-use super::{AssetManager, texture::TextureId};
+use crate::asset_manager::texture::TextureGroup;
+
+use super::{AssetManager, TextureId};
 
 pub const MAX_MAT: usize = 1024;
 
@@ -40,13 +42,6 @@ pub struct MaterialUniform {
     pub roughness_factor: f32,
     pub alpha_cutoff: f32,
     pub double_sided: u32,
-    pub base_color_tex: u32,         // sRGB array
-    pub emissive_tex: u32,           // sRGB array
-    pub normal_tex: u32,             // linear array
-    pub metallic_roughness_tex: u32, // linear array
-    pub occlusion_tex: u32,          // linear array
-
-    pub _pad1: [u32; 3],
 }
 impl Default for MaterialUniform {
     fn default() -> Self {
@@ -58,12 +53,6 @@ impl Default for MaterialUniform {
             roughness_factor: -1.0,
             alpha_cutoff: -1.0,
             double_sided: 12345,
-            base_color_tex: 0,
-            emissive_tex: 0,
-            normal_tex: 0,
-            metallic_roughness_tex: 0,
-            occlusion_tex: 0,
-            _pad1: [0; 3],
         }
     }
 }
@@ -94,23 +83,43 @@ impl AssetManager {
 
         let base_color_tex = material
             .base_color_texture
-            .map(|i| self.get_texture(&format!("{}#{}", path, i)))
-            .unwrap_or(0.into());
+            .map(|info| {
+                self.get_texture(
+                    &format!("{}#{}", path, info),
+                    wgpu::TextureFormat::Rgba8UnormSrgb, // Color data
+                )
+            })
+            .unwrap();
 
         let metallic_roughness_tex = material
             .metallic_roughness_texture
-            .map(|i| self.get_texture(&format!("{}#{}", path, i)))
-            .unwrap_or(0.into());
+            .map(|info| {
+                self.get_texture(
+                    &format!("{}#{}", path, info),
+                    wgpu::TextureFormat::Rgba8Unorm, // Non-color data
+                )
+            })
+            .unwrap();
 
         let normal_tex = material
             .normal_texture
-            .map(|i| self.get_texture(&format!("{}#{}", path, i)))
-            .unwrap_or(0.into());
+            .map(|info| {
+                self.get_texture(
+                    &format!("{}#{}", path, info),
+                    wgpu::TextureFormat::Rgba8Unorm,
+                )
+            })
+            .unwrap();
 
         let emissive_tex = material
             .emissive_texture
-            .map(|i| self.get_texture(&format!("{}#{}", path, i)))
-            .unwrap_or(0.into());
+            .map(|info| {
+                self.get_texture(
+                    &format!("{}#{}", path, info),
+                    wgpu::TextureFormat::Rgba8UnormSrgb,
+                )
+            })
+            .unwrap();
 
         let uniform: MaterialUniform = MaterialUniform {
             base_color_factor: material.base_color_factor,
@@ -120,10 +129,6 @@ impl AssetManager {
             emissive_padding: 0.0,
             alpha_cutoff: material.alpha_cutoff,
             double_sided: material.double_sided as u32,
-            base_color_tex: base_color_tex.0 as u32,
-            metallic_roughness_tex: metallic_roughness_tex.0 as u32,
-            normal_tex: normal_tex.0 as u32,
-            emissive_tex: emissive_tex.0 as u32,
             ..Default::default()
         };
 
@@ -131,6 +136,14 @@ impl AssetManager {
             .mat_free
             .pop()
             .expect("No free material slots available");
+
+        self.tex_by_mat[idx] = TextureGroup {
+            base_color: base_color_tex,
+            metallic_roughness: metallic_roughness_tex,
+            normal: normal_tex,
+            emissive: emissive_tex,
+            occlusion: normal_tex,
+        };
 
         let offset = (idx * std::mem::size_of::<MaterialUniform>()) as wgpu::BufferAddress;
         self.queue

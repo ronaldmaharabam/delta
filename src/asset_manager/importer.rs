@@ -2,8 +2,8 @@ use super::{
     material::Material,
     mesh::{Index, Primitive, Vertex},
 };
-use crate::asset_manager::{material::MaterialId, texture::TextureId};
-use gltf::{self, mesh::Mode};
+use crate::asset_manager::texture::{AddressMode, FilterMode, Sampler, Texture};
+use gltf::{self, Gltf, import, mesh::Mode};
 
 pub struct GltfImporter;
 
@@ -19,7 +19,6 @@ impl GltfImporter {
         (path, selector)
     }
 
-    /// Helper: select a mesh by name or index.
     fn select_mesh<'a>(doc: &'a gltf::Document, sel: Option<&str>, path: &str) -> gltf::Mesh<'a> {
         if let Some(s) = sel {
             if let Ok(idx) = s.parse::<usize>() {
@@ -36,7 +35,6 @@ impl GltfImporter {
         }
     }
 
-    /// Helper: select a material by name or index.
     fn select_material<'a>(
         doc: &'a gltf::Document,
         sel: Option<&str>,
@@ -142,5 +140,94 @@ impl GltfImporter {
                 .emissive_texture()
                 .map(|info| info.texture().index()),
         }
+    }
+
+    pub fn load_texture(&mut self, path: &str, selector: usize) -> Texture {
+        let (doc, buffers, _images) = import(path).expect("Failed to import glTF");
+        let tex = doc.textures().nth(selector).expect("Invalid texture index");
+        let img = tex.source().source();
+        let sampler_index = tex.sampler().index();
+
+        let (pixels, width, height) = match img {
+            gltf::image::Source::View { view, mime_type: _ } => {
+                let buffer = &buffers[view.buffer().index()];
+                let start = view.offset();
+                let end = start + view.length();
+                let data = &buffer[start..end];
+                let dyn_img =
+                    image::load_from_memory(data).expect("Failed to decode embedded image");
+                let rgba = dyn_img.to_rgba8();
+                let (w, h) = rgba.dimensions();
+                // Get the raw Vec<u8> directly
+                let pixels = rgba.into_raw();
+                (pixels, w, h)
+            }
+            gltf::image::Source::Uri { uri, mime_type: _ } => {
+                let parent = std::path::Path::new(path)
+                    .parent()
+                    .unwrap_or(std::path::Path::new("."));
+                let img_path = parent.join(uri);
+                let dyn_img = image::open(img_path).expect("Failed to open external image");
+                let rgba = dyn_img.to_rgba8();
+                let (w, h) = rgba.dimensions();
+                // Get the raw Vec<u8> directly
+                let pixels = rgba.into_raw();
+                (pixels, w, h)
+            }
+        };
+
+        Texture {
+            pixels, // This is now a Vec<u8>
+            width,
+            height,
+            sampler: sampler_index,
+        }
+    }
+    pub fn load_sampler(&mut self, path: &str, selector: usize) -> Sampler {
+        let gltf = Gltf::open(path).expect("Failed to open glTF file");
+        let s = gltf
+            .samplers()
+            .nth(selector)
+            .expect("Sampler index out of range");
+
+        let wrap = |mode: gltf::texture::WrappingMode| match mode {
+            gltf::texture::WrappingMode::ClampToEdge => AddressMode::ClampToEdge,
+            gltf::texture::WrappingMode::MirroredRepeat => AddressMode::MirrorRepeat,
+            gltf::texture::WrappingMode::Repeat => AddressMode::Repeat,
+        };
+
+        let mag = match s.mag_filter() {
+            Some(gltf::texture::MagFilter::Nearest) => FilterMode::Nearest,
+            Some(gltf::texture::MagFilter::Linear) | None => FilterMode::Linear,
+        };
+
+        let (min, mipmap) = match s.min_filter() {
+            Some(gltf::texture::MinFilter::Nearest) => (FilterMode::Nearest, FilterMode::Nearest),
+            Some(gltf::texture::MinFilter::Linear) => (FilterMode::Linear, FilterMode::Nearest),
+            Some(gltf::texture::MinFilter::NearestMipmapNearest) => {
+                (FilterMode::Nearest, FilterMode::Nearest)
+            }
+            Some(gltf::texture::MinFilter::LinearMipmapNearest) => {
+                (FilterMode::Linear, FilterMode::Nearest)
+            }
+            Some(gltf::texture::MinFilter::NearestMipmapLinear) => {
+                (FilterMode::Nearest, FilterMode::Linear)
+            }
+            Some(gltf::texture::MinFilter::LinearMipmapLinear) => {
+                (FilterMode::Linear, FilterMode::Linear)
+            }
+            None => (FilterMode::Linear, FilterMode::Nearest),
+        };
+
+        let sampler = Sampler {
+            address_mode_u: wrap(s.wrap_s()),
+            address_mode_v: wrap(s.wrap_t()),
+            address_mode_w: AddressMode::ClampToEdge,
+            mag_filter: mag,
+            min_filter: min,
+            mipmap_filter: mipmap,
+        };
+
+        sampler
     }
 }

@@ -42,6 +42,10 @@ pub struct AssetManager {
     pub sampler_default: SamplerId,
     pub sampler_by_name: HashMap<String, SamplerId>,
     pub samplers: SlotMap<SamplerId, wgpu::Sampler>,
+
+    pub color_tex_default: TextureId,
+    pub data_tex_default: TextureId,
+    pub depth_tex_default: TextureId,
 }
 
 impl AssetManager {
@@ -73,6 +77,48 @@ impl AssetManager {
                 ..Default::default()
             }));
 
+        let mut textures = SlotMap::with_key();
+
+        let color_tex = Self::create_color_texture(
+            device.as_ref(),
+            queue.as_ref(),
+            &[255, 255, 255, 255],
+            1,
+            1,
+        );
+
+        let data_tex =
+            Self::create_data_texture(device.as_ref(), queue.as_ref(), &[255, 255, 255, 255], 1, 1);
+        let depth_tex = Self::create_depth_texture(device.as_ref(), 1, 1);
+
+        let color_tex_default = textures.insert(GpuTexture {
+            tex_view: color_tex.create_view(&wgpu::TextureViewDescriptor::default()),
+            tex: color_tex,
+            sampler: sampler_default,
+        });
+
+        let data_tex_default = textures.insert(GpuTexture {
+            tex_view: data_tex.create_view(&wgpu::TextureViewDescriptor::default()),
+            tex: data_tex,
+            sampler: sampler_default,
+        });
+
+        let depth_tex_default = textures.insert(GpuTexture {
+            tex_view: depth_tex.create_view(&wgpu::TextureViewDescriptor::default()),
+            tex: depth_tex,
+            sampler: sampler_default,
+        });
+
+        let tex_by_mat = vec![
+            TextureGroup {
+                base_color: color_tex_default,
+                emissive: color_tex_default,
+                metallic_roughness: data_tex_default,
+                normal: data_tex_default,
+            };
+            MAX_MAT
+        ];
+
         Self {
             importer: GltfImporter::new(),
             device,
@@ -83,11 +129,14 @@ impl AssetManager {
             mat_free: (1..MAX_MAT).rev().collect(),
             mat_by_name: HashMap::new(),
             tex_by_key: HashMap::new(),
-            textures: SlotMap::with_key(),
-            tex_by_mat: Vec::with_capacity(MAX_MAT as usize),
+            textures,
+            tex_by_mat,
             sampler_by_name: HashMap::new(),
             samplers,
             sampler_default,
+            color_tex_default,
+            data_tex_default,
+            depth_tex_default,
         }
     }
     fn split_key<'a>(key: &'a str) -> (&'a str, Option<&'a str>) {

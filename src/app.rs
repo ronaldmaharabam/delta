@@ -1,4 +1,4 @@
-use std::{marker::PhantomData, sync::Arc};
+use std::sync::Arc;
 
 use hecs::World;
 use winit::{
@@ -6,11 +6,7 @@ use winit::{
     window::Window,
 };
 
-use crate::{
-    asset_manager::light::{Light, LightKind},
-    game::Game,
-    render::{Camera, ForwardRenderer, RenderCommand},
-};
+use crate::{game::Game, render::ForwardRenderer};
 
 pub struct App<G: Game> {
     pub window: Option<Arc<Window>>,

@@ -6,12 +6,12 @@ use crate::{
 };
 
 pub trait Game {
-    fn setup(&mut self, world: &mut World, renderer: &mut ForwardRenderer) {}
-    fn update(&mut self, world: &mut World, renderer: &mut ForwardRenderer) {}
+    fn setup(&mut self, _world: &mut World, _renderer: &mut ForwardRenderer) {}
+    fn update(&mut self, _world: &mut World, _renderer: &mut ForwardRenderer) {}
 }
 impl Game for () {
-    fn setup(&mut self, world: &mut World, renderer: &mut ForwardRenderer) {}
-    fn update(&mut self, world: &mut World, renderer: &mut ForwardRenderer) {
+    fn setup(&mut self, _world: &mut World, _renderer: &mut ForwardRenderer) {}
+    fn update(&mut self, _world: &mut World, renderer: &mut ForwardRenderer) {
         let asset = &mut renderer.asset;
         let mesh_id = asset.get_mesh("meshes/sphere.glb#0");
 

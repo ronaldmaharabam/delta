@@ -1,5 +1,4 @@
 use anyhow::Result;
-use async_trait::async_trait;
 use glam::{Mat4, Vec3};
 use std::num::NonZeroU64;
 use std::sync::Arc;
@@ -20,7 +19,7 @@ const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 
 pub mod gpu;
 
-pub struct RenderResource(wgpu::Buffer, wgpu::BindGroupLayout, wgpu::BindGroupLayout);
+//pub struct RenderResource(wgpu::Buffer, wgpu::BindGroupLayout, wgpu::BindGroupLayout);
 
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable, Debug)]
@@ -86,18 +85,17 @@ pub struct ForwardRenderer {
     pub asset: AssetManager,
     pub pipeline: wgpu::RenderPipeline,
     pub camera_buffer: wgpu::Buffer,
-    pub camera_bg: wgpu::BindGroup,
-    pub camera_bgl: wgpu::BindGroupLayout,
 
     pub camera: Camera,
 
-    pub depth_tex: wgpu::Texture,
-    pub depth_view: wgpu::TextureView,
-
     pub light_ssbo: wgpu::Buffer,
     pub light_params: wgpu::Buffer,
-    pub light_bg: wgpu::BindGroup,
-    pub light_bgl: wgpu::BindGroupLayout,
+
+    pub scene_bgl: wgpu::BindGroupLayout,
+    pub scene_bg: wgpu::BindGroup,
+
+    pub depth_tex: wgpu::Texture,
+    pub depth_view: wgpu::TextureView,
 
     pub mat_bg: wgpu::BindGroup,
     pub mat_bgl: wgpu::BindGroupLayout,
@@ -105,6 +103,8 @@ pub struct ForwardRenderer {
     pub mat_id_buffer: wgpu::Buffer,
     pub mat_id_bgl: wgpu::BindGroupLayout,
     pub mat_id_bg: wgpu::BindGroup,
+
+    pub tex_bgl: wgpu::BindGroupLayout,
 }
 
 impl ForwardRenderer {
@@ -140,12 +140,17 @@ impl ForwardRenderer {
             }],
         });
 
-        let (camera_buffer, camera_bgl, camera_bg) = Self::create_camera(&ctx.device);
-        let (light_ssbo, light_params, light_bgl, light_bg) =
-            Self::create_light(&ctx.device, MAX_LIGHTS);
+        //let (camera_buffer, camera_bgl, camera_bg) = Self::create_camera(&ctx.device);
+        //let (light_ssbo, light_params, light_bgl, light_bg) =
+        //    Self::create_light(&ctx.device, MAX_LIGHTS);
+
+        let (camera_buffer, light_ssbo, light_params, scene_bgl, scene_bg) =
+            Self::create_scene_bindings(&ctx.device, MAX_LIGHTS);
 
         let (mat_id_buffer, mat_id_bgl, mat_id_bg) =
             Self::create_material_id(&ctx.device, &ctx.queue, MAX_MAT);
+
+        let tex_bgl = Self::create_tex(&ctx.device);
 
         let depth_tex = ctx.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("Depth"),
@@ -179,7 +184,7 @@ impl ForwardRenderer {
                 ctx.device
                     .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                         label: Some("Forward Pipeline Layout"),
-                        bind_group_layouts: &[&camera_bgl, &light_bgl, &mat_bgl, &mat_id_bgl],
+                        bind_group_layouts: &[&scene_bgl, &tex_bgl, &mat_bgl, &mat_id_bgl],
                         push_constant_ranges: &[],
                     });
 
@@ -222,8 +227,6 @@ impl ForwardRenderer {
             asset,
             pipeline,
             camera_buffer,
-            camera_bg,
-            camera_bgl,
             camera: Camera {
                 eye: Vec3::new(0.0, 0.0, 5.0),
                 target: Vec3::ZERO,
@@ -233,17 +236,18 @@ impl ForwardRenderer {
                 z_far: 100.0,
                 aspect: 1.0,
             },
-            depth_tex,
-            depth_view,
             light_ssbo,
             light_params,
-            light_bg,
-            light_bgl,
+            scene_bgl,
+            scene_bg,
+            depth_tex,
+            depth_view,
             mat_bg,
             mat_bgl,
             mat_id_buffer,
             mat_id_bgl,
             mat_id_bg,
+            tex_bgl,
         })
     }
     pub fn render(&mut self, lights: &[Light], cam: &Camera, action: &[RenderCommand]) {
@@ -285,6 +289,7 @@ impl ForwardRenderer {
         let color_view = frame
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
+
         let depth_view = &self.depth_view;
 
         // upload lights
@@ -338,8 +343,8 @@ impl ForwardRenderer {
             });
 
             rpass.set_pipeline(&self.pipeline);
-            rpass.set_bind_group(0, &self.camera_bg, &[]);
-            rpass.set_bind_group(1, &self.light_bg, &[]);
+            rpass.set_bind_group(0, &self.scene_bg, &[]);
+            //rpass.set_bind_group(1, &self.light_bg, &[]);
             rpass.set_bind_group(2, &self.mat_bg, &[]);
 
             for cmd in action {
@@ -356,8 +361,11 @@ impl ForwardRenderer {
                         //let mat_id: u32 = p.material.0 as u32;
                         let offset = (p.material.0 * std::mem::size_of::<MatId>()) as u32;
 
-                        //queue.write_buffer(&self.mat_id_buffer, 0, bytemuck::bytes_of(&mat_id));
                         rpass.set_bind_group(3, &self.mat_id_bg, &[offset]);
+
+                        let tex_bg = self.create_texture_group_bind_group(device, p.material.0);
+                        rpass.set_bind_group(1, &tex_bg, &[]);
+
                         let first = p.first_index;
                         let count = p.index_count;
                         rpass.draw_indexed(first..first + count, p.base_vertex, 0..1);
@@ -413,6 +421,111 @@ impl ForwardRenderer {
             .queue
             .write_buffer(&self.camera_buffer, 0, bytemuck::bytes_of(&cu));
     }
+
+    pub fn create_scene_bindings(
+        device: &wgpu::Device,
+        max_lights: usize,
+    ) -> (
+        wgpu::Buffer, // Camera UBO
+        wgpu::Buffer, // Lights SSBO
+        wgpu::Buffer, // Light Params UBO
+        wgpu::BindGroupLayout,
+        wgpu::BindGroup,
+    ) {
+        // --- Create Buffers ---
+
+        // 1. Camera Buffer
+        let cam = CameraUniform::identity();
+        let camera_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Camera Buffer"),
+            contents: bytemuck::bytes_of(&cam),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+
+        // 2. Lights Storage Buffer
+        let light_stride = std::mem::size_of::<LightUniform>() as u64;
+        let lights_size = (max_lights as u64).saturating_mul(light_stride);
+        let lights_ssbo = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Lights SSBO"),
+            size: lights_size,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        // 3. Light Params Buffer
+        let params_ubo = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Light Params UBO"),
+            size: std::mem::size_of::<LightParams>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        // --- Create Combined Layout and Bind Group ---
+
+        let scene_bgl =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("Scene BGL"),
+                entries: &[
+                    // binding 0: Camera Uniform
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    // binding 1: Lights Storage Buffer
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::FRAGMENT, // Only needed in fragment shader
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: true },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    // binding 2: Light Count Uniform
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 2,
+                        visibility: wgpu::ShaderStages::FRAGMENT, // Only needed in fragment shader
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: NonZeroU64::new(
+                                std::mem::size_of::<LightParams>() as u64
+                            ),
+                        },
+                        count: None,
+                    },
+                ],
+            });
+
+        let scene_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Scene BG"),
+            layout: &scene_bgl,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: camera_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: lights_ssbo.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: params_ubo.as_entire_binding(),
+                },
+            ],
+        });
+
+        (camera_buffer, lights_ssbo, params_ubo, scene_bgl, scene_bg)
+    }
+
     pub fn create_light(
         device: &wgpu::Device,
         max_lights: usize,
@@ -578,5 +691,137 @@ impl ForwardRenderer {
         });
 
         (material_id_buffer, material_id_bgl, material_id_bg)
+    }
+    pub fn create_tex(device: &wgpu::Device) -> wgpu::BindGroupLayout {
+        let texture_group_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("TextureGroup BGL"),
+            entries: &[
+                // base_color
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+                // metallic_roughness
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+                // normal
+                wgpu::BindGroupLayoutEntry {
+                    binding: 4,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 5,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+                // emissive
+                wgpu::BindGroupLayoutEntry {
+                    binding: 6,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 7,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
+        });
+        texture_group_bgl
+    }
+    pub fn create_texture_group_bind_group(
+        &self,
+        device: &wgpu::Device,
+        material_index: usize,
+    ) -> wgpu::BindGroup {
+        let texture_group = &self.asset.tex_by_mat[material_index];
+
+        let base_color = &self.asset.textures[texture_group.base_color];
+        let metallic_roughness = &self.asset.textures[texture_group.metallic_roughness];
+        let normal = &self.asset.textures[texture_group.normal];
+        let emissive = &self.asset.textures[texture_group.emissive];
+
+        let base_color_sampler = &self.asset.samplers[base_color.sampler];
+        let metallic_roughness_sampler = &self.asset.samplers[metallic_roughness.sampler];
+        let normal_sampler = &self.asset.samplers[normal.sampler];
+        let emissive_sampler = &self.asset.samplers[emissive.sampler];
+
+        device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("TextureGroup BindGroup"),
+            layout: &self.tex_bgl,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&base_color.tex_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(base_color_sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::TextureView(&metallic_roughness.tex_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::Sampler(metallic_roughness_sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: wgpu::BindingResource::TextureView(&normal.tex_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: wgpu::BindingResource::Sampler(normal_sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 6,
+                    resource: wgpu::BindingResource::TextureView(&emissive.tex_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 7,
+                    resource: wgpu::BindingResource::Sampler(emissive_sampler),
+                },
+            ],
+        })
     }
 }

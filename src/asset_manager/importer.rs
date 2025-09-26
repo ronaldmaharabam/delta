@@ -12,12 +12,12 @@ impl GltfImporter {
         Self
     }
 
-    fn split_key<'a>(key: &'a str) -> (&'a str, Option<&'a str>) {
-        let mut it = key.splitn(2, '#');
-        let path = it.next().unwrap_or(key);
-        let selector = it.next();
-        (path, selector)
-    }
+    //fn split_key<'a>(key: &'a str) -> (&'a str, Option<&'a str>) {
+    //    let mut it = key.splitn(2, '#');
+    //    let path = it.next().unwrap_or(key);
+    //    let selector = it.next();
+    //    (path, selector)
+    //}
 
     fn select_mesh<'a>(doc: &'a gltf::Document, sel: Option<&str>, path: &str) -> gltf::Mesh<'a> {
         if let Some(s) = sel {
@@ -78,28 +78,33 @@ impl GltfImporter {
                 .map(|it| it.collect())
                 .unwrap_or_else(|| vec![[0.0, 1.0, 0.0]; positions.len()]);
 
-            let uvs_f32: Vec<[f32; 2]> = reader
+            let uvs: Vec<[f32; 2]> = reader
                 .read_tex_coords(0)
                 .map(|tc| tc.into_f32().collect())
                 .unwrap_or_else(|| vec![[0.0, 0.0]; positions.len()]);
 
-            let indices_u32: Vec<u32> = match reader.read_indices() {
+            let tangents: Vec<[f32; 4]> = reader
+                .read_tangents()
+                .map(|it| it.collect())
+                .unwrap_or_else(|| vec![[1.0, 0.0, 0.0, 1.0]; positions.len()]);
+
+            let indices: Vec<u32> = match reader.read_indices() {
                 Some(gltf::mesh::util::ReadIndices::U8(i)) => i.map(|v| v as u32).collect(),
                 Some(gltf::mesh::util::ReadIndices::U16(i)) => i.map(|v| v as u32).collect(),
                 Some(gltf::mesh::util::ReadIndices::U32(i)) => i.collect(),
                 None => (0u32..positions.len() as u32).collect(),
             };
 
-            let n = positions.len().min(normals.len()).min(uvs_f32.len());
-            let vertices = (0..n)
+            let vertices = (0..positions.len())
                 .map(|i| Vertex {
                     position: positions[i],
+                    uv: uvs[i],
                     normal: normals[i],
-                    uv: uvs_f32[i],
+                    tangent: tangents[i],
                 })
                 .collect::<Vec<_>>();
 
-            let tri_indices = indices_u32
+            let tri_indices = indices
                 .chunks(3)
                 .filter(|tri| tri.len() == 3)
                 .map(|tri| Index {

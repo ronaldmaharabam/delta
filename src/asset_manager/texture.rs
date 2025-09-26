@@ -68,7 +68,6 @@ pub struct TextureGroup {
     pub metallic_roughness: TextureId,
     pub normal: TextureId,
     pub emissive: TextureId,
-    pub occlusion: TextureId,
 }
 impl AssetManager {
     pub fn get_texture(&mut self, key: &str, format: wgpu::TextureFormat) -> TextureId {

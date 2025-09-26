@@ -9,15 +9,17 @@ pub const MAX_OBJECTS: usize = 10000;
 #[derive(Clone, Copy, Debug, Zeroable, Pod)]
 pub struct Vertex {
     pub position: [f32; 3],
-    pub normal: [f32; 3],
     pub uv: [f32; 2],
+    pub normal: [f32; 3],
+    pub tangent: [f32; 4],
 }
 
 impl Vertex {
-    pub const ATTRS: [wgpu::VertexAttribute; 3] = wgpu::vertex_attr_array![
+    pub const ATTRS: [wgpu::VertexAttribute; 4] = wgpu::vertex_attr_array![
         0 => Float32x3,
-        1 => Float32x3,
-        2 => Float32x2,
+        1 => Float32x2,
+        2 => Float32x3,
+        3 => Float32x4,
     ];
 
     pub fn buffer_layout<'a>() -> wgpu::VertexBufferLayout<'a> {
@@ -28,7 +30,6 @@ impl Vertex {
         }
     }
 }
-
 #[derive(Clone)]
 pub struct Index {
     pub idx: [u32; 3],

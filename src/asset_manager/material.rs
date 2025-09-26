@@ -1,6 +1,6 @@
 use crate::asset_manager::texture::TextureGroup;
 
-use super::{AssetManager, TextureId};
+use super::AssetManager;
 
 pub const MAX_MAT: usize = 1024;
 
@@ -84,42 +84,46 @@ impl AssetManager {
         let base_color_tex = material
             .base_color_texture
             .map(|info| {
+                println!("base");
                 self.get_texture(
                     &format!("{}#{}", path, info),
                     wgpu::TextureFormat::Rgba8UnormSrgb, // Color data
                 )
             })
-            .unwrap();
+            .unwrap_or(self.color_tex_default);
 
         let metallic_roughness_tex = material
             .metallic_roughness_texture
             .map(|info| {
+                println!("met");
                 self.get_texture(
                     &format!("{}#{}", path, info),
                     wgpu::TextureFormat::Rgba8Unorm, // Non-color data
                 )
             })
-            .unwrap();
+            .unwrap_or(self.data_tex_default);
 
         let normal_tex = material
             .normal_texture
             .map(|info| {
+                println!("normal");
                 self.get_texture(
                     &format!("{}#{}", path, info),
                     wgpu::TextureFormat::Rgba8Unorm,
                 )
             })
-            .unwrap();
+            .unwrap_or(self.data_tex_default);
 
         let emissive_tex = material
             .emissive_texture
             .map(|info| {
+                println!("emmisive");
                 self.get_texture(
                     &format!("{}#{}", path, info),
                     wgpu::TextureFormat::Rgba8UnormSrgb,
                 )
             })
-            .unwrap();
+            .unwrap_or(self.color_tex_default);
 
         let uniform: MaterialUniform = MaterialUniform {
             base_color_factor: material.base_color_factor,
@@ -142,7 +146,6 @@ impl AssetManager {
             metallic_roughness: metallic_roughness_tex,
             normal: normal_tex,
             emissive: emissive_tex,
-            occlusion: normal_tex,
         };
 
         let offset = (idx * std::mem::size_of::<MaterialUniform>()) as wgpu::BufferAddress;

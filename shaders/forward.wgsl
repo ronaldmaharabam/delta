@@ -8,8 +8,8 @@ struct Camera {
     _pad0     : f32,
 };
 
-@group(0) @binding(0)
-var<uniform> camera : Camera;
+//@group(0) @binding(0)
+//var<uniform> camera : Camera;
 
 // ---- Lights ----
 struct GpuLight {
@@ -30,9 +30,18 @@ struct LightParams {
     count : u32,
 };
 
-@group(1) @binding(0)
+//@group(1) @binding(0)
+//var<storage, read> u_lights : LightBuffer;
+//@group(1) @binding(1)
+//var<uniform> u_lightParams : LightParams;
+
+@group(0) @binding(0)
+var<uniform> camera : Camera;
+
+@group(0) @binding(1)
 var<storage, read> u_lights : LightBuffer;
-@group(1) @binding(1)
+
+@group(0) @binding(2)
 var<uniform> u_lightParams : LightParams;
 
 // ---- Materials ----
@@ -44,7 +53,6 @@ struct Material {
     roughness_factor  : f32,
     alpha_cutoff      : f32,
     double_sided      : u32,
-    texture_indices   : array<i32, 4>,
 };
 
 @group(2) @binding(0)
@@ -53,25 +61,46 @@ var<storage, read> materials : array<Material>;
 // ---- Per-draw material ID ----
 struct MaterialParams {
     id : u32,
-    _pad: vec3<u32>, 
-
+    _pad: vec3<u32>, // WGSL requires a multiple of 16, padding is fine
 };
 
 @group(3) @binding(0)
 var<uniform> material_params : MaterialParams;
+
+// ---- PBR Textures ----
+@group(1) @binding(0)
+var t_base_color: texture_2d<f32>;
+@group(1) @binding(1)
+var s_base_color: sampler;
+@group(1) @binding(2)
+var t_metallic_roughness: texture_2d<f32>;
+@group(1) @binding(3)
+var s_metallic_roughness: sampler;
+@group(1) @binding(4)
+var t_normal: texture_2d<f32>;
+@group(1) @binding(5)
+var s_normal: sampler;
+@group(1) @binding(6)
+var t_emissive: texture_2d<f32>;
+@group(1) @binding(7)
+var s_emissive: sampler;
+
 
 // ---- Vertex I/O ----
 struct VSIn {
     @location(0) position : vec3<f32>,
     @location(1) uv       : vec2<f32>,
     @location(2) normal   : vec3<f32>,
+    @location(3) tangent  : vec4<f32>, // Added for normal mapping
 };
 
 struct VSOut {
     @builtin(position) pos_clip : vec4<f32>,
-    @location(0) uv             : vec2<f32>,
-    @location(1) pos_ws         : vec3<f32>,
-    @location(2) n_ws           : vec3<f32>,
+    @location(0) uv         : vec2<f32>,
+    @location(1) pos_ws     : vec3<f32>,
+    @location(2) t_ws       : vec3<f32>, // Tangent
+    @location(3) b_ws       : vec3<f32>, // Bitangent
+    @location(4) n_ws       : vec3<f32>, // Normal
 };
 
 @vertex
@@ -80,7 +109,20 @@ fn vs_main(in: VSIn) -> VSOut {
     out.pos_clip = camera.view_proj * vec4<f32>(in.position, 1.0);
     out.uv       = in.uv;
     out.pos_ws   = in.position;
-    out.n_ws     = normalize(in.normal);
+
+    // NOTE: Assumes world space == object space. If a model transform is used,
+    // it must be applied to normal, tangent, and bitangent as well.
+    let n = normalize(in.normal);
+    let t = normalize(in.tangent.xyz);
+    // Gram-Schmidt re-orthogonalize T with respect to N
+    let t_ortho = normalize(t - dot(t, n) * n);
+    // Calculate bitangent using handedness from tangent.w
+    let b = cross(n, t_ortho) * in.tangent.w;
+
+    out.n_ws = n;
+    out.t_ws = t_ortho;
+    out.b_ws = b;
+
     return out;
 }
 
@@ -134,16 +176,29 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     // NOTE: CPU must ensure material_params.id is in-range.
     let mat = materials[material_params.id];
 
-    // base_color_factor in glTF is linear already => don't pow
-    let albedo : vec3<f32> = mat.base_color_factor.rgb;
+    // --- Material Properties from Textures and Factors ---
+    // Albedo
+    let base_color_sample = textureSample(t_base_color, s_base_color, in.uv);
+    let albedo = base_color_sample.rgb * mat.base_color_factor.rgb;
 
-    let metallic  = mat.metallic_factor;
-    // clamp roughness to avoid singularities; allow very small values but not zero
-    let roughness = clamp(mat.roughness_factor, 0.02, 1.0);
+    // Metallic and Roughness (glTF standard: B channel=metallic, G channel=roughness)
+    let metallic_roughness_sample = textureSample(t_metallic_roughness, s_metallic_roughness, in.uv);
+    let metallic = metallic_roughness_sample.b * mat.metallic_factor;
+    let roughness = clamp(metallic_roughness_sample.g * mat.roughness_factor, 0.02, 1.0);
 
-    let N = normalize(in.n_ws);
+    // Normal Mapping
+    let tbn = mat3x3<f32>(normalize(in.t_ws), normalize(in.b_ws), normalize(in.n_ws));
+    var normal_map_sample = textureSample(t_normal, s_normal, in.uv).rgb;
+    // Unpack from [0, 1] range to [-1, 1] range
+    normal_map_sample = normalize(normal_map_sample * 2.0 - 1.0);
+    let N = normalize(tbn * normal_map_sample);
 
-    // camera position provided in camera uniform
+    // Emissive
+    let emissive_sample = textureSample(t_emissive, s_emissive, in.uv);
+    let emissive = mat.emissive_factor * emissive_sample.rgb;
+
+    // --- PBR Lighting Calculation ---
+    // View direction
     let V = normalize(camera.camera_pos - in.pos_ws);
     var Lo = vec3<f32>(0.0);
 
@@ -155,30 +210,28 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
         var att : f32 = 1.0;
 
         if (Ld.light_type == 0u) { // Point
-            let toL   = Ld.position - in.pos_ws;
-            let dist  = length(toL);
-            L         = normalize(toL);
-            att       = range_atten(dist, Ld.range);
+            let toL  = Ld.position - in.pos_ws;
+            let dist = length(toL);
+            L        = normalize(toL);
+            att      = range_atten(dist, Ld.range);
         } else if (Ld.light_type == 1u) { // Directional
             L = normalize(-Ld.direction);
         } else { // Spot
-            let toL   = Ld.position - in.pos_ws;
-            let dist  = length(toL);
-            L         = normalize(toL);
+            let toL  = Ld.position - in.pos_ws;
+            let dist = length(toL);
+            L        = normalize(toL);
             let spotC = dot(-L, normalize(Ld.direction));
-            let cone  = saturate((spotC - Ld.outer_cos) / max(Ld.inner_cos - Ld.outer_cos, 1e-4));
-            att       = range_atten(dist, Ld.range) * cone;
+            let cone = saturate((spotC - Ld.outer_cos) / max(Ld.inner_cos - Ld.outer_cos, 1e-4));
+            att      = range_atten(dist, Ld.range) * cone;
         }
 
         let H = normalize(V + L);
-
         let NDF = distribution_ggx(N, H, roughness);
         let G   = geometry_smith(N, V, L, roughness);
 
         // F0: dielectric default 0.04, lerp to albedo for metals
         var F0 = vec3<f32>(0.04);
-        // metallic blends the F0 toward albedo (albedo should be linear)
-        F0 = F0 + (albedo - F0) * metallic;
+        F0 = F0 + (albedo - F0) * metallic; // mix() is equivalent
 
         let cosHV = max(dot(H, V), 0.0);
         let F = fresnel_schlick(cosHV, F0);
@@ -198,13 +251,12 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
         Lo += (diffuse + specular) * Ld.color * NdotL * att;
     }
 
-    let emissive = mat.emissive_factor;
 
-    // HDR accumulation -> simple tonemap -> gamma
+    // --- Final Color Composition ---
+    // HDR accumulation -> simple tonemap -> gamma correction
     var color = Lo + emissive;
     color = tonemap_reinhard(color);
     color = pow(max(color, vec3<f32>(0.0)), vec3<f32>(1.0 / 2.2));
 
-    return vec4<f32>(color, 1.0);
+    return vec4<f32>(color, base_color_sample.a * mat.base_color_factor.a);
 }
-

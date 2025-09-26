@@ -70,10 +70,10 @@ impl Game for MoonGame {
     }
     fn update(&mut self, _world: &mut hecs::World, renderer: &mut ForwardRenderer) {
         if let Some(id) = self.mesh_id {
-            let mesh_id = renderer.asset.get_mesh("meshes/sphere.glb#0");
+            let mesh_id = renderer.asset.get_mesh("");
             let action = &[
+                //RenderCommand { mesh_id: id },
                 RenderCommand { mesh_id: mesh_id },
-                RenderCommand { mesh_id: id },
             ];
 
             renderer.render(&[self.sun], &self.cam, action);
@@ -207,6 +207,7 @@ impl MoonGame {
                     position: [px, 0.0, py],
                     normal: [0.0, 1.0, 0.0],
                     uv: [u, v],
+                    tangent: [1.0, 0.0, 0.0, 1.0],
                 });
             }
         }
